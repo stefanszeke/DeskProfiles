@@ -1,19 +1,12 @@
-# DeskProfiles — targeted shortcut positioning repair (experimental)
+# DeskProfiles — managed deletion and sidebar navigation repair
 
-Based on the previous icon-diagnostics baseline. This update does not change saved layout files or shortcut ownership.
+Based on discovery repair. Keeps current position restoration and creation auto-assignment.
 
-Changes:
-- Suppress false restoration failures for managed shortcuts intentionally hidden by the destination profile.
-- Wait until managed shortcut names appear/disappear in the actual Explorer desktop icon inventory.
-- Reposition only currently visible icons that are more than 2px from their saved location.
-- Limit restore passes to three with short verification delays; no repeated retries of absent icons.
-- Log eligible, hidden, missing, and verified icon counts.
+- Deleted unmanaged shortcuts still removed automatically.
+- A managed desktop shortcut that is *supposed to be visible* but was deleted manually is removed from catalog after two consecutive 2-second polls (and a 3-second grace after switches). Archived backup remains untouched.
+- Managed shortcuts intentionally hidden by profile changes remain in the catalog.
+- Re-click the selected profile to return from Settings or Activity.
 
-Limitations:
-- A newly created shortcut without any saved position still needs manual arrangement and Save Layout.
-- The existing automatic discovery setting and behavior have not been changed.
-- Explorer can still reflow desktop icons; test carefully with disposable shortcuts.
-- Builds have not been compiled or run on Windows in this environment.
+Caution: If another program temporarily removes a visible managed shortcut for several seconds, the app may treat it as manual deletion. Backup your %LOCALAPPDATA%\DeskProfiles directory before testing.
 
-Exit DeskProfiles from the system tray before rebuilding. Back up `%LOCALAPPDATA%\DeskProfiles` before testing.
-Run `dotnet build` then `dotnet run` on Windows.
+Quit via system tray before copying files and run `dotnet build` then `dotnet run`. Build/runtime not verified on Windows here.

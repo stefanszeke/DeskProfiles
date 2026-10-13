@@ -24,11 +24,13 @@ public partial class MainWindow : Window
     bool switchingProfile;
     FileSystemWatcher? desktopWatcher;
     readonly HashSet<string> newDesktopShortcuts = new(StringComparer.OrdinalIgnoreCase);
-    readonly DispatcherTimer shortcutWatchTimer = new() { Interval = TimeSpan.FromSeconds(3) };
-    readonly DispatcherTimer shortcutReconcileTimer = new() { Interval = TimeSpan.FromSeconds(5) };
+    readonly DispatcherTimer shortcutWatchTimer = new() { Interval = TimeSpan.FromMilliseconds(850) };
+    readonly DispatcherTimer shortcutReconcileTimer = new() { Interval = TimeSpan.FromSeconds(2) };
     readonly HashSet<string> knownDesktopFiles = new(StringComparer.OrdinalIgnoreCase);
     readonly Dictionary<string, string> discoveredForProfile = new(StringComparer.OrdinalIgnoreCase);
     bool reconcilingDesktop;
+    readonly Dictionary<string, int> missingVisibleManagedChecks = new(StringComparer.OrdinalIgnoreCase);
+    DateTime lastShortcutReconcileUtc = DateTime.UtcNow;
     Profile? recordingProfile;
 
     readonly DispatcherTimer monitorTimer;
@@ -122,6 +124,7 @@ public partial class MainWindow : Window
         AutoRestoreBox.IsChecked = settings.AutoRestore;
         ShortcutSwitchingBox.IsChecked = settings.EnableShortcutVisibilitySwitching;
         StartWithWindowsBox.IsChecked = StartupRegistration.IsEnabled();
+        AutoManageShortcutBox.IsChecked = settings.AutoManageNewShortcuts;
         loading = false;
         RefreshMonitors();
         RefreshDetails();
@@ -132,7 +135,6 @@ public partial class MainWindow : Window
         Loaded += (_, _) => { InitializeTrayAndHotkeys(); try { InventoryDesktop(); RefreshShortcuts(); } catch (Exception ex) { Diagnostics.Error("Desktop inventory", ex); } StartShortcutWatcher(); StartDesktopReconciliation(); };
         shortcutWatchTimer.Tick += NewShortcutTimer_Tick;
         shortcutReconcileTimer.Tick += (_, _) => ReconcileDesktopInventory();
-        AutoManageShortcutBox.IsChecked = settings.AutoManageNewShortcuts;
     }
 
     void ShowPage(string page)
@@ -144,6 +146,13 @@ public partial class MainWindow : Window
     }
 
     void SettingsPage_Click(object sender, RoutedEventArgs e) => ShowPage("settings");
+    void ProfileList_PreviewMouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        // SelectionChanged does not fire when the already-selected row is clicked again.
+        // Allow navigation back from Settings/Activity without choosing another profile first.
+        if (SettingsPage.Visibility == Visibility.Visible || ActivityPage.Visibility == Visibility.Visible)
+            ShowPage("profiles");
+    }
     void ActivityPage_Click(object sender, RoutedEventArgs e) => ShowPage("activity");
 
     void OpenFolder(string folder)
@@ -305,8 +314,8 @@ public partial class MainWindow : Window
                     bool enabled = item.Shared || profile.ShortcutIds.Contains(item.Id);
                     // Indeterminate is intentionally NOT assigned. Unmanaged shortcuts remain visible
                     // until explicitly enrolled; a checked box would incorrectly suggest sharing.
-                    var box = new System.Windows.Controls.CheckBox { IsThreeState = !item.IsManaged,
-                        IsChecked = item.IsManaged ? enabled : null, Width = 96,
+                    var box = new System.Windows.Controls.CheckBox { IsThreeState = false,
+                        IsChecked = item.IsManaged && enabled, Width = 96,
                         HorizontalContentAlignment = WpfHorizontalAlignment.Center, HorizontalAlignment = WpfHorizontalAlignment.Center,
                         VerticalAlignment = VerticalAlignment.Center, ToolTip = $"Show {item.Name} in {profile.Name}" };
                     box.Checked += (_, _) => SetShortcutVisibility(item, profile, true);
@@ -315,7 +324,7 @@ public partial class MainWindow : Window
                 }
                 ShortcutMatrix.Children.Add(line);
             }
-            ShortcutInventoryStatus.Text = $"{settings.ManagedShortcuts.Count} shortcuts • {settings.ManagedShortcuts.Count(i => i.IsManaged)} managed. — means Unmanaged (always visible until enrolled); checkboxes on managed shortcuts are real profile assignments.";
+            ShortcutInventoryStatus.Text = $"{settings.ManagedShortcuts.Count} shortcuts • {settings.ManagedShortcuts.Count(i => i.IsManaged)} managed. Unmanaged shortcuts are visible in all profiles until enrolled; checkboxes show actual assignments.";
         }
         finally { updatingShortcutMatrix = false; }
     }
@@ -603,6 +612,7 @@ public partial class MainWindow : Window
 
     void UpdateManagedShortcuts()
     {
+        lastShortcutReconcileUtc = DateTime.UtcNow;
         if (!settings.EnableShortcutVisibilitySwitching)
         {
             Diagnostics.Info("[BASELINE] Shortcut reconciliation SKIPPED (disabled in Settings).");
@@ -649,7 +659,7 @@ public partial class MainWindow : Window
             "Automatically manage NEW .lnk/.url shortcuts created on your personal Desktop?\n\nExisting shortcuts will stay unmanaged. New shortcuts are backed up, assigned to the active profile, and hidden in other profiles. Real files/folders are never moved.",
             "Automatic shortcut management", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
         { AutoManageShortcutBox.IsChecked = false; return; }
-        try { settings.AutoManageNewShortcuts = enabled; Persist(); Log($"Auto-manage new shortcuts: {enabled}"); }
+        try { settings.AutoManageNewShortcuts = enabled; Persist(); Log($"[DISCOVERY] Auto-manage new shortcuts: {enabled}; visibility switching={settings.EnableShortcutVisibilitySwitching}"); }
         catch (Exception ex) { Error(ex); }
     }
 
@@ -658,7 +668,7 @@ public partial class MainWindow : Window
     {
         foreach (var path in EnumeratePersonalDesktopShortcuts()) knownDesktopFiles.Add(path);
         shortcutReconcileTimer.Start();
-        Diagnostics.Info($"[DISCOVERY] Baseline {knownDesktopFiles.Count} desktop shortcuts; poll every 5s (missed events fallback).");
+        Diagnostics.Info($"[DISCOVERY] Baseline {knownDesktopFiles.Count} desktop shortcuts; poll every 2s; autoManage={settings.AutoManageNewShortcuts}; visibility={settings.EnableShortcutVisibilitySwitching}.");
     }
 
     List<string> EnumeratePersonalDesktopShortcuts()
@@ -682,14 +692,24 @@ public partial class MainWindow : Window
             var current = EnumeratePersonalDesktopShortcuts().ToHashSet(StringComparer.OrdinalIgnoreCase);
             var created = current.Except(knownDesktopFiles, StringComparer.OrdinalIgnoreCase).ToList();
             var removed = knownDesktopFiles.Except(current, StringComparer.OrdinalIgnoreCase).ToList();
-            // Track all current names, including managed copies. They are filtered before import.
+            // Count only stable observations; switching and its async Explorer events are handled separately.
             knownDesktopFiles.Clear();
             knownDesktopFiles.UnionWith(current);
             int stale = CleanupMissingUnmanagedDesktopShortcuts();
-            if (stale > 0) { Persist(); RefreshShortcuts(); }
-            if (removed.Count > 0) Diagnostics.Info($"[DISCOVERY] Missing desktop paths={removed.Count}; stale unmanaged={stale}");
+            int deletedManaged = CleanupManuallyDeletedManagedShortcuts(current);
+            if (stale > 0 || deletedManaged > 0)
+            {
+                Persist();
+                RefreshShortcuts();
+                if (stale > 0) Log($"[DISCOVERY] Removed {stale} deleted unmanaged shortcut(s) from the list.");
+                if (deletedManaged > 0) Log($"[DISCOVERY] Removed {deletedManaged} manually deleted managed shortcut(s) from the catalog; backup files preserved.");
+            }
+            if (removed.Count > 0)
+                Diagnostics.Info($"[DISCOVERY] Desktop files disappeared={removed.Count}; stale unmanaged={stale} (managed files may be hidden by profiles)");
             foreach (var path in created)
             {
+                // The switcher creates managed desktop copies. They are not new shortcuts.
+                if (IsAlreadyManagedDesktopCopy(path)) continue;
                 Diagnostics.Info($"[DISCOVERY] Poll found new file {Path.GetFileName(path)}; autoManage={settings.AutoManageNewShortcuts}");
                 QueueNewShortcut(path);
             }
@@ -697,6 +717,42 @@ public partial class MainWindow : Window
         catch (Exception ex) { Diagnostics.Error("Desktop reconciliation", ex); }
         finally { reconcilingDesktop = false; }
     }
+
+    // A managed shortcut hidden by switching must never be removed from the catalog.
+    // Only a shortcut expected to be visible in the ACTIVE profile may be considered deleted.
+    // Two consecutive scans + switch grace period protect asynchronous Explorer updates.
+    int CleanupManuallyDeletedManagedShortcuts(HashSet<string> current)
+    {
+        if (!settings.EnableShortcutVisibilitySwitching ||
+            DateTime.UtcNow - lastShortcutReconcileUtc < TimeSpan.FromSeconds(3)) return 0;
+        int removed = 0;
+        foreach (var item in settings.ManagedShortcuts.Where(i => i.IsManaged).ToList())
+        {
+            if (string.IsNullOrWhiteSpace(item.DesktopFileName)) continue;
+            string path = Path.Combine(ManagedDesktop.UserDesktop, item.DesktopFileName);
+            bool shouldBeVisible = item.Shared || Active.ShortcutIds.Contains(item.Id);
+            if (!shouldBeVisible || current.Contains(path) || File.Exists(path))
+            {
+                missingVisibleManagedChecks.Remove(path);
+                continue;
+            }
+            int checks = missingVisibleManagedChecks.GetValueOrDefault(path) + 1;
+            missingVisibleManagedChecks[path] = checks;
+            if (checks < 2) continue;
+            // The desktop file was removed outside DeskProfiles while its profile was active.
+            // Only drop ownership references; retain the archived original for recovery.
+            settings.ManagedShortcuts.Remove(item);
+            foreach (var profile in settings.Profiles) profile.ShortcutIds.Remove(item.Id);
+            missingVisibleManagedChecks.Remove(path);
+            Diagnostics.Info($"[DISCOVERY] User-deleted visible managed shortcut: {item.DesktopFileName}; archived backup preserved at {item.ArchivedOriginal}");
+            removed++;
+        }
+        return removed;
+    }
+
+    bool IsAlreadyManagedDesktopCopy(string path) =>
+        settings.ManagedShortcuts.Any(i => i.IsManaged &&
+            string.Equals(i.DesktopFileName, Path.GetFileName(path), StringComparison.OrdinalIgnoreCase));
 
     void StartShortcutWatcher()
     {
@@ -719,54 +775,71 @@ public partial class MainWindow : Window
 
     void QueueNewShortcut(string path)
     {
-        if (Path.GetExtension(path) is not (".lnk" or ".url")) return;
-        Diagnostics.Info($"[DISCOVERY] Event {Path.GetFileName(path)}; active={settings.ActiveProfile}; autoManage={settings.AutoManageNewShortcuts}");
-        Dispatcher.BeginInvoke(() => {
+        var extension = Path.GetExtension(path);
+        if (!extension.Equals(".lnk", StringComparison.OrdinalIgnoreCase) &&
+            !extension.Equals(".url", StringComparison.OrdinalIgnoreCase)) return;
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (IsAlreadyManagedDesktopCopy(path)) return;
+            // Capture ownership when discovered, not when a later debounce completes.
             if (!discoveredForProfile.ContainsKey(path)) discoveredForProfile[path] = settings.ActiveProfile;
             newDesktopShortcuts.Add(path);
-            shortcutWatchTimer.Stop(); shortcutWatchTimer.Start();
+            Diagnostics.Info($"[DISCOVERY] Queued {Path.GetFileName(path)}; owner={discoveredForProfile[path]}; autoManage={settings.AutoManageNewShortcuts}; visibility={settings.EnableShortcutVisibilitySwitching}");
+            if (!shortcutWatchTimer.IsEnabled) shortcutWatchTimer.Start();
         });
     }
 
     void NewShortcutTimer_Tick(object? sender, EventArgs e)
     {
-        if (switchingProfile) { shortcutWatchTimer.Stop(); shortcutWatchTimer.Start(); return; }
+        if (switchingProfile) return; // Keep pending batch, retry on next tick.
         shortcutWatchTimer.Stop();
         var paths = newDesktopShortcuts.ToList(); newDesktopShortcuts.Clear();
-        Diagnostics.Info($"[DISCOVERY] Batch count={paths.Count}; active={settings.ActiveProfile}; autoManage={settings.AutoManageNewShortcuts}");
-        if (!settings.AutoManageNewShortcuts || !settings.EnableShortcutVisibilitySwitching)
-        {
-            Diagnostics.Info("[DISCOVERY] Auto-management disabled: files left unmanaged.");
-            foreach (var path in paths) discoveredForProfile.Remove(path);
-            return;
-        }
+        Diagnostics.Info($"[DISCOVERY] Processing batch={paths.Count}; autoManage={settings.AutoManageNewShortcuts}; visibility={settings.EnableShortcutVisibilitySwitching}");
         foreach (var path in paths)
         {
-            var discoveryTimer = System.Diagnostics.Stopwatch.StartNew();
+            var timer = System.Diagnostics.Stopwatch.StartNew();
             try
             {
-                if (!File.Exists(path)) continue;
+                if (!File.Exists(path) || IsAlreadyManagedDesktopCopy(path)) continue;
                 var owner = settings.Profiles.FirstOrDefault(p => p.Name == discoveredForProfile.GetValueOrDefault(path)) ?? Active;
-                if (settings.ManagedShortcuts.Any(i => i.IsManaged && string.Equals(i.DesktopFileName, Path.GetFileName(path), StringComparison.OrdinalIgnoreCase))) continue;
-                if (ShortcutLibrary.AlreadyImported(settings, path))
+                var existing = settings.ManagedShortcuts.FirstOrDefault(i => !i.IsManaged &&
+                    !string.IsNullOrWhiteSpace(i.SourcePath) &&
+                    string.Equals(Path.GetFullPath(i.SourcePath), Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase));
+                bool imported = false;
+                if (existing == null)
                 {
-                    var existing = settings.ManagedShortcuts.FirstOrDefault(i => !i.IsManaged && string.Equals(i.SourcePath, path, StringComparison.OrdinalIgnoreCase));
-                    if (existing == null) { Log($"New shortcut {Path.GetFileName(path)} already cataloged; left unmanaged."); continue; }
+                    // Do not rely on content hashes here: different shortcuts can have identical bytes.
+                    existing = ShortcutLibrary.Import(settings, path);
+                    imported = true;
+                }
+                if (settings.AutoManageNewShortcuts && settings.EnableShortcutVisibilitySwitching)
+                {
                     if (!owner.ShortcutIds.Contains(existing.Id)) owner.ShortcutIds.Add(existing.Id);
                     ManagedDesktop.Enroll(settings, existing, path);
+                    UpdateManagedShortcuts();
+                    Log($"[DISCOVERY] Automatically assigned '{existing.Name}' to '{owner.Name}'.");
                 }
                 else
                 {
-                    var item = ShortcutLibrary.Import(settings, path);
-                    owner.ShortcutIds.Add(item.Id);
-                    ManagedDesktop.Enroll(settings, item, path);
+                    Persist();
+                    if (imported) Log($"[DISCOVERY] Added unmanaged shortcut '{existing.Name}' to the list (automatic assignment disabled).");
                 }
-                UpdateManagedShortcuts();
-                Log($"Automatically assigned new shortcut '{Path.GetFileName(path)}' to '{owner.Name}'.");
                 RefreshShortcuts();
             }
-            catch (Exception ex) { Diagnostics.Error("Auto-manage shortcut " + path, ex); Log("Auto-import failed: " + ex.Message); }
-            finally { discoveredForProfile.Remove(path); Diagnostics.Info($"[DISCOVERY] Processed {Path.GetFileName(path)} in {discoveryTimer.ElapsedMilliseconds}ms; active={settings.ActiveProfile}"); }
+            catch (IOException ex) when (File.Exists(path) && timer.ElapsedMilliseconds < 2000)
+            {
+                // Windows can expose a shortcut before the creating process finishes writing it.
+                Diagnostics.Info($"[DISCOVERY] Retrying busy shortcut {Path.GetFileName(path)}: {ex.Message}");
+                newDesktopShortcuts.Add(path);
+                if (!shortcutWatchTimer.IsEnabled) shortcutWatchTimer.Start();
+                continue;
+            }
+            catch (Exception ex) { Diagnostics.Error("Auto-manage shortcut " + path, ex); Log("[DISCOVERY] Import failed: " + ex.Message); }
+            finally
+            {
+                if (!newDesktopShortcuts.Contains(path)) discoveredForProfile.Remove(path);
+                Diagnostics.Info($"[DISCOVERY] Processed {Path.GetFileName(path)} in {timer.ElapsedMilliseconds}ms");
+            }
         }
     }
 
@@ -890,6 +963,7 @@ public partial class MainWindow : Window
     {
         if (switchingProfile || ReferenceEquals(profile, Active)) return;
         switchingProfile = true;
+        lastShortcutReconcileUtc = DateTime.UtcNow;
         SwitchOverlay.Visibility = Visibility.Visible;
         SwitchTitle.Text = $"Switching to {profile.Name}…";
         SwitchStage.Text = "Preparing shortcuts";

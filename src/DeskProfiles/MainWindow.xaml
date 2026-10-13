@@ -47,7 +47,7 @@
         </StackPanel>
         <StackPanel>
           <TextBlock Text="PROFILES" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource Muted}" Margin="4,0,0,12"/>
-          <ListBox x:Name="ProfileList" Background="Transparent" BorderThickness="0" SelectionChanged="ProfileList_SelectionChanged">
+          <ListBox x:Name="ProfileList" Background="Transparent" BorderThickness="0" SelectionChanged="ProfileList_SelectionChanged" PreviewMouseLeftButtonUp="ProfileList_PreviewMouseLeftButtonUp">
             <ListBox.ItemTemplate>
               <DataTemplate>
                 <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
