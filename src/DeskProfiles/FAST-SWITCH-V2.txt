@@ -1,0 +1,13 @@
+DeskProfiles — Fast switching v2 (experimental)
+
+Based on the working fast-profile-switch-experiment source.
+- The optimistic readiness probe is a genuine short interval poll (70 ms), not a one-shot test.
+- Polls icon identities without GetItemPosition() using DesktopIcons.CaptureKeys().
+- On layout profiles, waits for required positionable icons to appear, without gating on outgoing shortcuts.
+- On no-layout profiles such as Clean, keeps the loader visible until outgoing managed icons disappear from Explorer.
+- Logs [FAST] probe timings and mode=fast-required-present, fast-outgoing-gone, timeout etc.
+- Timeout remains 4 seconds; icon position verification and monitor transition engine unchanged.
+
+Build: dotnet build; dotnet run
+Check desktop visual state as well as timings. Back up settings first.
+Not Windows-build-tested in this environment.

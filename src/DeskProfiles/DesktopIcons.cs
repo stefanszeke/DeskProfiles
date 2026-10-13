@@ -163,6 +163,34 @@ internal static class DesktopIcons
             || name.EndsWith("\\" + fileName, StringComparison.OrdinalIgnoreCase);
     }
 
+    // Inventory-only Shell probe: avoid GetItemPosition for each desktop item.
+    // Open a fresh IFolderView each time so Explorer restarts never invalidate a cache.
+    public static HashSet<string> CaptureKeys()
+    {
+        var view = OpenView();
+        try
+        {
+            var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var iid = typeof(IEnumIDList).GUID;
+            view.Items(2, ref iid, out var enumPtr); // SVGIO_ALLVIEW
+            if (enumPtr == IntPtr.Zero) throw new InvalidOperationException("Icon inventory enumeration failed.");
+            var iterator = (IEnumIDList)Marshal.GetObjectForIUnknown(enumPtr);
+            Marshal.Release(enumPtr);
+            try
+            {
+                while (iterator.Next(1, out var pidl, IntPtr.Zero) == 0)
+                {
+                    if (pidl == IntPtr.Zero) break;
+                    try { keys.Add(StableKey(pidl, Convert.ToBase64String(PidlBytes(pidl)))); }
+                    finally { Marshal.FreeCoTaskMem(pidl); }
+                }
+            }
+            finally { Marshal.ReleaseComObject(iterator); }
+            return keys;
+        }
+        finally { Marshal.ReleaseComObject(view); }
+    }
+
     public static List<IconPosition> Capture()
     {
         var view = OpenView();

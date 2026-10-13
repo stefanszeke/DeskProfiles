@@ -1133,41 +1133,15 @@ public partial class MainWindow : Window
             trace.Next("Shortcut reconcile");
             SetSwitchStage("Updating desktop shortcuts");
             UpdateManagedShortcuts();
-            // Experimental fast path: a profile with no layout needs no icon positioning.
-            // When a layout exists, positioning only needs its eligible icons to be present.
-            // Do not wait for unrelated hidden items to disappear before attempting a restore.
-            // Fall back to the original conservative readiness poll if required items are missing.
+            // Only wait for the visual Shell state required by this switch.
+            // For layouts, new items must exist before SelectAndPositionItems can work.
+            // For layout-free profiles, outgoing managed icons must actually disappear
+            // before the loading indicator is dismissed.
             trace.Next("Explorer readiness");
-            SetSwitchStage("Checking Windows Explorer");
-            bool ready = true;
-            string readinessMode = "not-needed";
-            if (layout != null && settings.EnableShortcutVisibilitySwitching)
-            {
-                var hiddenForReadiness = settings.ManagedShortcuts
-                    .Where(i => i.IsManaged && !i.Shared && !profile.ShortcutIds.Contains(i.Id))
-                    .Select(i => i.DesktopFileName)
-                    .Where(n => !string.IsNullOrWhiteSpace(n)).ToArray();
-                var required = layout.Icons.Where(i => !hiddenForReadiness.Any(n => DesktopIcons.KeyMatchesFilename(i.Pidl, n))).ToList();
-                try
-                {
-                    var available = DesktopIcons.Capture().Select(i => i.Pidl)
-                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                    if (available.Count > 0 && required.All(i => available.Contains(i.Pidl)))
-                        readinessMode = "optimistic-all-target-icons-present";
-                    else
-                    {
-                        readinessMode = "conservative-fallback";
-                        SetSwitchStage("Waiting for Windows Explorer");
-                        ready = await WaitForManagedShortcutsAsync(profile, TimeSpan.FromSeconds(4));
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Diagnostics.Error("Optimistic Explorer probe", ex);
-                    readinessMode = "conservative-fallback-after-error";
-                    ready = await WaitForManagedShortcutsAsync(profile, TimeSpan.FromSeconds(4));
-                }
-            }
+            SetSwitchStage("Waiting for desktop icons");
+            var readiness = await WaitForProfileViewAsync(profile, layout, TimeSpan.FromSeconds(4));
+            bool ready = readiness.Ready;
+            string readinessMode = readiness.Mode;
             trace.Note($"Explorer ready={ready}; mode={readinessMode}; shortcutVisibilityEnabled={settings.EnableShortcutVisibilitySwitching}");
             if (!ready) Log("Warning: Explorer icon inventory did not settle; only currently visible icons will be positioned.");
             trace.Next("Layout restoration and verification");
@@ -1249,30 +1223,56 @@ public partial class MainWindow : Window
         }
     }
 
-    async System.Threading.Tasks.Task<bool> WaitForManagedShortcutsAsync(Profile profile, TimeSpan timeout)
+    // Poll Shell item identities only (no per-icon GetItemPosition). One observation
+    // of all required layout items is sufficient: actual positions are verified below.
+    // A layout-free profile waits for outgoing icons to disappear so the loader does
+    // not finish while Explorer is still displaying the previous profile's files.
+    async System.Threading.Tasks.Task<(bool Ready, string Mode)> WaitForProfileViewAsync(
+        Profile profile, Layout? layout, TimeSpan timeout)
     {
-        var managed = settings.ManagedShortcuts.Where(i => i.IsManaged && !string.IsNullOrWhiteSpace(i.DesktopFileName)).ToList();
-        var desired = managed.Where(i => i.Shared || profile.ShortcutIds.Contains(i.Id))
-            .Select(i => i.DesktopFileName).ToList();
+        if (!settings.EnableShortcutVisibilitySwitching)
+            return (true, "visibility-disabled");
+
+        var managed = settings.ManagedShortcuts
+            .Where(i => i.IsManaged && !string.IsNullOrWhiteSpace(i.DesktopFileName)).ToList();
         var hidden = managed.Where(i => !i.Shared && !profile.ShortcutIds.Contains(i.Id))
-            .Select(i => i.DesktopFileName).ToList();
-        var start = DateTime.UtcNow;
-        int stable = 0;
-        while (DateTime.UtcNow - start < timeout)
+            .Select(i => i.DesktopFileName).ToArray();
+        var required = layout?.Icons
+            .Where(i => !hidden.Any(n => DesktopIcons.KeyMatchesFilename(i.Pidl, n)))
+            .Select(i => i.Pidl).ToArray() ?? Array.Empty<string>();
+
+        // On layout-free profiles the visual completion criterion is disappearance.
+        // On profiles with layouts, we only need the icons we are about to position.
+        bool checkDisappear = layout == null;
+        if (!checkDisappear && required.Length == 0)
+            return (true, "no-positionable-icons");
+        if (checkDisappear && hidden.Length == 0)
+            return (true, "no-outgoing-icons");
+
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        int polls = 0;
+        while (started.Elapsed < timeout)
         {
-            if (Key() != currentTopology) return false;
+            if (reallyExit || Key() != currentTopology)
+                return (false, "topology-changed");
             try
             {
-                var icons = DesktopIcons.Capture();
-                bool visibleExpected = desired.All(name => icons.Any(i => DesktopIcons.KeyMatchesFilename(i.Pidl, name)));
-                bool absentExpected = hidden.All(name => !icons.Any(i => DesktopIcons.KeyMatchesFilename(i.Pidl, name)));
-                if (visibleExpected && absentExpected && icons.Count > 0) stable++; else stable = 0;
-                if (stable >= 2) return true;
+                polls++;
+                var keys = DesktopIcons.CaptureKeys();
+                bool matched = checkDisappear
+                    ? hidden.All(name => !keys.Any(k => DesktopIcons.KeyMatchesFilename(k, name)))
+                    : required.All(key => keys.Contains(key));
+                if (matched)
+                {
+                    Diagnostics.Info($"[FAST] Shell inventory matched after {started.ElapsedMilliseconds}ms; polls={polls}; check={(checkDisappear ? "disappear" : "appear")}");
+                    return (true, checkDisappear ? "fast-outgoing-gone" : "fast-required-present");
+                }
             }
-            catch (Exception ex) { Diagnostics.Error("Explorer readiness probe", ex); stable = 0; }
-            await System.Threading.Tasks.Task.Delay(150);
+            catch (Exception ex) { Diagnostics.Error("Fast Explorer inventory probe", ex); }
+            await System.Threading.Tasks.Task.Delay(70);
         }
-        return false;
+        Diagnostics.Info($"[FAST] Shell inventory timed out after {started.ElapsedMilliseconds}ms; polls={polls}");
+        return (false, checkDisappear ? "outgoing-timeout" : "required-timeout");
     }
 
     void Rename_Click(object sender, RoutedEventArgs e)
