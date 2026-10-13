@@ -35,6 +35,7 @@ public partial class MainWindow : Window
     Profile? recordingProfile;
 
     readonly DispatcherTimer monitorTimer;
+    int monitorTransitionGeneration;
     string currentTopology;
     string pendingTopology;
     DateTime pendingSince;
@@ -49,7 +50,7 @@ public partial class MainWindow : Window
         public string Name => Profile.Name;
         public Visibility ActiveVisibility { get; init; }
     }
-    sealed record LayoutRow(string Title, string Detail);
+    sealed record LayoutRow(string Key, string Title, string Detail);
     public sealed record MonitorRow(string DeviceName, string Description, bool IsIgnored);
     bool updatingMonitors;
     bool updatingWallpaper;
@@ -62,8 +63,12 @@ public partial class MainWindow : Window
             .OrderByDescending(l => l.SavedUtc).FirstOrDefault();
     }
 
-    Layout? FindLayout(Profile profile) => FindExactLayout(profile)
-        ?? SmartMonitorLayouts.TryCreate(profile, currentTopology, settings.IgnoredMonitors)?.Layout;
+    Layout? FindLayout(Profile profile)
+    {
+        var layout = FindExactLayout(profile)
+            ?? SmartMonitorLayouts.TryCreate(profile, currentTopology, settings.IgnoredMonitors)?.Layout;
+        return layout == null ? null : EligibleMonitorPlacement.Constrain(layout, settings.IgnoredMonitors);
+    }
 
     void CopyInheritedLayout_Click(object sender, RoutedEventArgs e)
     {
@@ -175,14 +180,16 @@ public partial class MainWindow : Window
         ProfilesPage.Visibility = page == "profiles" ? Visibility.Visible : Visibility.Collapsed;
         SettingsPage.Visibility = page == "settings" ? Visibility.Visible : Visibility.Collapsed;
         ActivityPage.Visibility = page == "activity" ? Visibility.Visible : Visibility.Collapsed;
+        ShortcutsPage.Visibility = page == "shortcuts" ? Visibility.Visible : Visibility.Collapsed;
     }
 
     void SettingsPage_Click(object sender, RoutedEventArgs e) => ShowPage("settings");
+    void ShortcutsPage_Click(object sender, RoutedEventArgs e) { RefreshShortcuts(); ShowPage("shortcuts"); }
     void ProfileList_PreviewMouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
         // SelectionChanged does not fire when the already-selected row is clicked again.
         // Allow navigation back from Settings/Activity without choosing another profile first.
-        if (SettingsPage.Visibility == Visibility.Visible || ActivityPage.Visibility == Visibility.Visible)
+        if (SettingsPage.Visibility == Visibility.Visible || ActivityPage.Visibility == Visibility.Visible || ShortcutsPage.Visibility == Visibility.Visible)
             ShowPage("profiles");
     }
     void ActivityPage_Click(object sender, RoutedEventArgs e) => ShowPage("activity");
@@ -253,12 +260,98 @@ public partial class MainWindow : Window
         RefreshShortcuts();
         HotkeyText.Text = string.IsNullOrWhiteSpace(profile.Hotkey) ? "None" : profile.Hotkey;
         HotkeyHint.Text = "Available globally while DeskProfiles is running.";
-        SavedLayoutsList.ItemsSource = profile.Layouts.Values.OrderByDescending(l => l.SavedUtc)
-            .Select(l => new LayoutRow(MonitorIdentity.MatchKey(l.MonitorKey, settings.IgnoredMonitors) == currentTopology ? "● Current monitor setup" : "Saved monitor setup",
-                $"{MonitorIdentity.DescribeKey(l.MonitorKey)}  ·  {l.Icons.Count} icons  ·  {l.SavedUtc.ToLocalTime():g}"))
-            .ToList();
+        string? priorLayoutKey = (SavedLayoutsList.SelectedItem as LayoutRow)?.Key;
+        var rows = profile.Layouts.Select(entry =>
+        {
+            var l = entry.Value;
+            bool current = MonitorIdentity.MatchKey(l.MonitorKey, settings.IgnoredMonitors) == currentTopology;
+            string label = profile.LayoutNames.TryGetValue(entry.Key, out var name) && !string.IsNullOrWhiteSpace(name)
+                ? name : (current ? "Current monitor setup" : "Saved monitor setup");
+            return new LayoutRow(entry.Key, (current ? "● " : "") + label,
+                $"{MonitorIdentity.DescribeKey(l.MonitorKey)}  ·  {l.Icons.Count} icons  ·  {l.SavedUtc.ToLocalTime():g}");
+        }).OrderByDescending(r => r.Key == currentTopology).ThenBy(r => r.Title).ToList();
+        SavedLayoutsList.ItemsSource = rows;
+        SavedLayoutsList.SelectedItem = rows.FirstOrDefault(r => r.Key == priorLayoutKey);
+        UpdateLayoutButtons();
     }
 
+
+    LayoutRow? SelectedSavedLayout => SavedLayoutsList.SelectedItem as LayoutRow;
+
+    void SavedLayoutsList_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateLayoutButtons();
+    void UpdateLayoutButtons()
+    {
+        if (LayoutCopyButton == null) return;
+        var row = SelectedSavedLayout;
+        bool allowed = row != null && !switchingProfile;
+        bool isCurrent = allowed && MonitorIdentity.MatchKey(row!.Key, settings.IgnoredMonitors) == currentTopology;
+        LayoutCopyButton.IsEnabled = allowed && !isCurrent && ReferenceEquals(Selected, Active);
+        LayoutRenameButton.IsEnabled = allowed;
+        LayoutDeleteButton.IsEnabled = allowed;
+        LayoutResetButton.IsEnabled = allowed && isCurrent;
+    }
+
+    void LayoutRename_Click(object sender, RoutedEventArgs e)
+    {
+        var row = SelectedSavedLayout;
+        if (row == null || switchingProfile) return;
+        var profile = Selected;
+        var existing = profile.LayoutNames.TryGetValue(row.Key, out var name) ? name : "";
+        var next = Microsoft.VisualBasic.Interaction.InputBox("Name for this monitor layout:", "Rename layout", existing).Trim();
+        if (next.Length == 0 || next == existing) return;
+        try { profile.LayoutNames[row.Key] = next; Persist(); RefreshDetails(); Log($"Renamed layout to '{next}'."); }
+        catch (Exception ex) { Error(ex); }
+    }
+
+    void LayoutCopy_Click(object sender, RoutedEventArgs e)
+    {
+        var row = SelectedSavedLayout;
+        if (row == null || switchingProfile || !ReferenceEquals(Selected, Active)) return;
+        var profile = Selected;
+        if (!profile.Layouts.TryGetValue(row.Key, out var source)) return;
+        bool replacing = FindExactLayout(profile) != null;
+        var prompt = replacing ? "Replace the CURRENT setup's saved layout with a copy of the selected layout?" :
+            "Create an independent layout for the CURRENT monitor setup from the selected layout?";
+        if (System.Windows.MessageBox.Show(prompt + "\n\nYour source layout will not change.", "Copy monitor layout",
+            MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+        try
+        {
+            var donor = new Profile();
+            donor.Layouts[row.Key] = source;
+            var mapped = SmartMonitorLayouts.TryCreate(donor, currentTopology, settings.IgnoredMonitors);
+            if (mapped == null || mapped.Layout.Icons.Count == 0)
+            {
+                Log("Cannot safely map the selected layout to this monitor setup. Nothing copied."); return;
+            }
+            profile.Layouts[currentTopology] = new Layout { MonitorKey = currentTopology,
+                Icons = mapped.Layout.Icons.Select(i => new IconPosition { Pidl = i.Pidl, X = i.X, Y = i.Y }).ToList() };
+            Persist(); RefreshDetails();
+            Log($"Copied {mapped.Layout.Icons.Count} positions to current monitor setup; source preserved.");
+        }
+        catch (Exception ex) { Error(ex); }
+    }
+
+    void DeleteSavedLayout(string key)
+    {
+        var profile = Selected;
+        if (!profile.Layouts.TryGetValue(key, out var layout)) return;
+        if (System.Windows.MessageBox.Show($"Delete saved positions for this monitor setup in '{profile.Name}'?\n\nNo shortcuts or other layouts will be deleted. A settings backup is kept.",
+            "Delete saved monitor layout", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+        try { profile.Layouts.Remove(key); profile.LayoutNames.Remove(key); Persist(); RefreshDetails();
+              Log($"Deleted saved monitor layout ({layout.Icons.Count} icon positions) for '{profile.Name}'."); }
+        catch (Exception ex) { profile.Layouts[key] = layout; Error(ex); }
+    }
+    void LayoutDelete_Click(object sender, RoutedEventArgs e)
+    {
+        if (switchingProfile || SelectedSavedLayout is not { } row) return;
+        DeleteSavedLayout(row.Key);
+    }
+    void LayoutReset_Click(object sender, RoutedEventArgs e)
+    {
+        if (switchingProfile || SelectedSavedLayout is not { } row) return;
+        if (MonitorIdentity.MatchKey(row.Key, settings.IgnoredMonitors) != currentTopology) return;
+        DeleteSavedLayout(row.Key); // Removing the exact override restores automatic inheritance.
+    }
 
     ManagedShortcut? SelectedShortcut => (ShortcutList.SelectedItem as ShortcutRow)?.Item;
 
@@ -1006,6 +1099,7 @@ public partial class MainWindow : Window
     {
         if (switchingProfile || ReferenceEquals(profile, Active)) return;
         switchingProfile = true;
+        monitorTransitionGeneration++; // Cancel any pending monitor restoration before profile activation.
         lastShortcutReconcileUtc = DateTime.UtcNow;
         try
         {
@@ -1259,18 +1353,99 @@ public partial class MainWindow : Window
 
     void MonitorTimer_Tick(object? sender, EventArgs e)
     {
-        if (switchingProfile) return;
+        if (reallyExit) return;
         string topology;
         try { topology = Key(); }
         catch (Exception ex) { Diagnostics.Error("Monitor polling", ex); return; }
-        if (topology != pendingTopology) { pendingTopology = topology; pendingSince = DateTime.UtcNow; return; }
-        if (topology == currentTopology || DateTime.UtcNow - pendingSince < TimeSpan.FromSeconds(4)) return;
+        if (topology != pendingTopology)
+        {
+            pendingTopology = topology;
+            pendingSince = DateTime.UtcNow;
+            // Invalidate any pending delayed restore as soon as a new display change is seen.
+            monitorTransitionGeneration++;
+            return;
+        }
+        if (switchingProfile || topology == currentTopology ||
+            DateTime.UtcNow - pendingSince < TimeSpan.FromSeconds(4)) return;
         currentTopology = topology;
         undo = null;
         RefreshMonitors();
         RefreshDetails();
         Log("Stable monitor configuration change detected.");
-        if (settings.AutoRestore) RestoreCurrent();
+        if (settings.AutoRestore)
+            _ = RestoreAfterMonitorSettlesAsync(topology, ++monitorTransitionGeneration);
+    }
+
+    async System.Threading.Tasks.Task RestoreAfterMonitorSettlesAsync(string expectedTopology, int generation)
+    {
+        // Explorer can move icons AFTER WM_DISPLAYCHANGE and after monitor geometry stabilizes.
+        // Sample icon positions before restoring instead of racing Explorer with immediate writes.
+        bool Current() => !reallyExit && !switchingProfile && settings.AutoRestore &&
+            generation == monitorTransitionGeneration && expectedTopology == currentTopology &&
+            Key() == expectedTopology;
+        try
+        {
+            Log($"[MONITOR] Transition #{generation}: waiting for Explorer icon stability; topology={expectedTopology}");
+            string? previousSignature = null;
+            int consecutive = 0;
+            var watch = Stopwatch.StartNew();
+            // At least 1.5 seconds of observation, >=3 equal snapshots, bounded at 7 seconds.
+            while (watch.Elapsed < TimeSpan.FromSeconds(7))
+            {
+                await System.Threading.Tasks.Task.Delay(350);
+                if (!Current()) { Log($"[MONITOR] Transition #{generation} cancelled (display/profile/settings changed)."); return; }
+                var icons = DesktopIcons.Capture();
+                if (icons.Count == 0) { consecutive = 0; continue; }
+                var signature = string.Join("|", icons.OrderBy(i => i.Pidl, StringComparer.OrdinalIgnoreCase)
+                    .Select(i => $"{i.Pidl}:{i.X},{i.Y}"));
+                consecutive = signature == previousSignature ? consecutive + 1 : 1;
+                previousSignature = signature;
+                if (watch.ElapsedMilliseconds >= 1500 && consecutive >= 3) break;
+            }
+            if (!Current()) return;
+            Log($"[MONITOR] Transition #{generation}: observed positions for {watch.ElapsedMilliseconds}ms; stableSamples={consecutive}");
+            var layout = FindLayout(Active);
+            if (layout == null) { Log($"[MONITOR] No saved or inheritable layout for '{Active.Name}'."); return; }
+            // FindLayout constrains ignored and disconnected monitor targets. Log the
+            // complete current display geometry because the Shell view uses a
+            // virtual-desktop-local coordinate system.
+            var virtualOrigin = EligibleMonitorPlacement.VirtualOrigin();
+            Log($"[MONITOR] Transition #{generation}: layoutSource={(FindExactLayout(Active) != null ? "exact" : "inherited")}; virtualOrigin=({virtualOrigin.Left},{virtualOrigin.Top}); screens=" +
+                string.Join("; ", Forms.Screen.AllScreens.Select(screen =>
+                    $"{screen.DeviceName} bounds={screen.Bounds} primary={screen.Primary} ignored={settings.IgnoredMonitors.Contains(screen.DeviceName, StringComparer.OrdinalIgnoreCase)}")));
+            var snapshot = DesktopIcons.Capture();
+            var applied = DesktopIcons.Restore(layout.Icons);
+            undo = snapshot;
+            Log($"[MONITOR] Transition #{generation}: restored {applied}/{layout.Icons.Count} icons after Explorer settled.");
+            // Post-restore verification also protects against a late Explorer rearrangement.
+            for (int check = 1; check <= 3; check++)
+            {
+                await System.Threading.Tasks.Task.Delay(check == 1 ? 700 : 950);
+                if (!Current()) return;
+                var actual = DesktopIcons.Capture().ToDictionary(p => p.Pidl, StringComparer.OrdinalIgnoreCase);
+                var moved = layout.Icons.Where(p => actual.TryGetValue(p.Pidl, out var now) &&
+                    (Math.Abs(now.X - p.X) > 2 || Math.Abs(now.Y - p.Y) > 2)).ToList();
+                int missing = layout.Icons.Count(p => !actual.ContainsKey(p.Pidl));
+                Log($"[MONITOR] Transition #{generation}: verify #{check}: moved={moved.Count}, missing={missing}");
+                if (check == 1 || (check == 3 && moved.Count > 0))
+                {
+                    foreach (var expected in moved)
+                    {
+                        var observed = actual[expected.Pidl];
+                        var label = expected.Pidl.StartsWith("name:", StringComparison.OrdinalIgnoreCase)
+                            ? expected.Pidl[5..] : "legacy:" + expected.Pidl[..Math.Min(18, expected.Pidl.Length)];
+                        Log($"[MONITOR] Transition #{generation}: [ICON] MOVED '{label}' target=({expected.X},{expected.Y}) actual=({observed.X},{observed.Y}) delta=({observed.X - expected.X},{observed.Y - expected.Y})");
+                    }
+                }
+                if (moved.Count > 0)
+                {
+                    DesktopIcons.Restore(moved);
+                    Log($"[MONITOR] Transition #{generation}: corrected {moved.Count} moved icon(s) (not saved).");
+                }
+            }
+            Log($"[MONITOR] Transition #{generation}: completed.");
+        }
+        catch (Exception ex) { Diagnostics.Error("Monitor transition stability restore", ex); }
     }
 
     void InitializeTrayAndHotkeys()
@@ -1320,13 +1495,30 @@ public partial class MainWindow : Window
             Hide();
             return;
         }
-        shortcutWatchTimer.Stop(); shortcutReconcileTimer.Stop(); desktopWatcher?.Dispose();
+        // The switch loader is a standalone WPF Window. Hiding it is not enough:
+        // WPF's default shutdown mode waits until *all* windows have closed.
+        monitorTransitionGeneration++;
+        monitorTimer.Stop();
+        shortcutWatchTimer.Stop();
+        shortcutReconcileTimer.Stop();
+        desktopWatcher?.Dispose();
+        desktopWatcher = null;
         hotkeys?.Dispose();
+        hotkeys = null;
         if (tray != null)
         {
             tray.Visible = false;
             tray.Dispose();
+            tray = null;
         }
+        if (switchLoadingWindow != null)
+        {
+            switchLoadingWindow.Close();
+            switchLoadingWindow = null;
+        }
+        // Explicitly exit instead of depending on OnLastWindowClose with tray/loader windows.
+        Dispatcher.BeginInvoke(new Action(() => System.Windows.Application.Current.Shutdown()),
+            DispatcherPriority.ContextIdle);
     }
 
     void HotkeyRecord_Click(object sender, RoutedEventArgs e)

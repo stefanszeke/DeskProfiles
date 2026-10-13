@@ -34,6 +34,25 @@ internal static class SmartMonitorLayouts
         return from.Primary == to.Primary ? 2 : 1;
     }
 
+    // Find the nearest vacant Explorer grid slot. Search by distance from the
+    // desired position, so collisions never compact unrelated icon groups.
+    private static (int Col, int Row) NearestFreeSlot(int col, int row, int columns, int rows,
+        HashSet<(int Col, int Row)> occupied)
+    {
+        var best = (Col: col, Row: row);
+        int bestDistance = int.MaxValue;
+        for (int c = 0; c < columns; c++)
+            for (int r = 0; r < rows; r++)
+            {
+                if (occupied.Contains((c, r))) continue;
+                int distance = Math.Abs(c - col) * 2 + Math.Abs(r - row);
+                if (distance >= bestDistance) continue;
+                bestDistance = distance;
+                best = (c, r);
+            }
+        return best;
+    }
+
     internal static Inherited? TryCreate(Profile profile, string currentKey, IEnumerable<string> ignored)
     {
         var targets = Parse(currentKey);
@@ -45,8 +64,9 @@ internal static class SmartMonitorLayouts
         }).Where(x => x.Displays.Count > 0 && x.Layout.Icons.Count > 0).ToList();
         if (donors.Count == 0) return null;
 
-        var virtualLeft = targets.Min(s => s.X);
-        var virtualTop = targets.Min(s => s.Y);
+        // Shell icon positions are relative to the entire Windows virtual desktop,
+        // including displays ignored for profile matching.
+        var (virtualLeft, virtualTop) = EligibleMonitorPlacement.VirtualOrigin();
         var result = new Dictionary<string, IconPosition>(StringComparer.OrdinalIgnoreCase);
         var used = new HashSet<string>(StringComparer.Ordinal);
         int monitorsMatched = 0;
@@ -67,6 +87,10 @@ internal static class SmartMonitorLayouts
                 && ReferenceEquals(matches[1].Layout, winner.Layout)
                 && matches[1].Source != winner.Source) continue;
 
+            // Saved positions are virtual-desktop-local. Donor display topology
+            // may not include ignored screens, so do not assume its minimum
+            // eligible X/Y is the Shell origin. For older arrangements the
+            // source key origin is the best available approximation.
             int sourceVirtualLeft = winner.Displays.Min(s => s.X);
             int sourceVirtualTop = winner.Displays.Min(s => s.Y);
             int mapped = 0;
@@ -89,47 +113,73 @@ internal static class SmartMonitorLayouts
                 used.Add(winner.Layout.MonitorKey);
             }
         }
-        // Single-display fallback: icons whose original display is no longer present
-        // should still be accessible. Place missing icons into free grid cells on the
-        // remaining display, *without saving* these temporary positions.
+        // For a single remaining monitor, transfer the *arrangement* of icons from
+        // disconnected displays. Never collapse them into a new first column.
+        // Exact layouts are handled by MainWindow before this inheritance path.
         if (targets.Count == 1)
         {
             var target = targets[0];
-            // Prefer a previous multi-monitor layout, which is most likely to contain
-            // icons from BOTH displays. Choose newest among the richest layouts.
-            var donor = donors.OrderByDescending(d => d.Displays.Count)
-                              .ThenByDescending(d => d.Layout.Icons.Count)
-                              .ThenByDescending(d => d.Layout.SavedUtc).First();
-            var allIcons = donor.Layout.Icons;
-            // Fixed desktop grid dimensions are approximate. Use actual saved target
-            // positions where available; reserve a free grid cell for each fallback.
-            const int gridX = 76, gridY = 86;
-            const int marginX = 21, marginY = 2;
-            int columns = Math.Max(1, (target.Width - marginX - 20) / gridX);
-            int rows = Math.Max(1, (target.Height - marginY - 20) / gridY);
-            var occupied = new HashSet<(int, int)>();
-            foreach (var placed in result.Values)
-                occupied.Add((Math.Clamp((placed.X - marginX + gridX / 2) / gridX, 0, columns - 1),
-                              Math.Clamp((placed.Y - marginY + gridY / 2) / gridY, 0, rows - 1)));
-            foreach (var icon in allIcons)
+            // Choose a multi-display donor that actually contains this monitor.
+            // This keeps the transferred icons and the directly inherited icons
+            // sourced from the same saved arrangement wherever possible.
+            var donor = donors.Where(d => d.Displays.Count > 1 &&
+                                           d.Displays.Any(s => MatchScore(s, target) > 0))
+                              .OrderByDescending(d => d.Displays.Count)
+                              .ThenByDescending(d => d.Layout.SavedUtc)
+                              .FirstOrDefault()
+                        ?? donors.Where(d => d.Displays.Any(s => MatchScore(s, target) > 0))
+                                 .OrderByDescending(d => d.Layout.SavedUtc).FirstOrDefault();
+            if (donor != null)
             {
-                if (result.ContainsKey(icon.Pidl)) continue;
-                // Temporary fallback: fill Windows-style desktop grid from the top-left,
-                // going DOWN each column before advancing right. Preserve positions
-                // already inherited directly from the available display.
-                // Do not translate donor coordinates for disconnected monitors.
-                if (occupied.Count >= columns * rows) break;
-                var slot = Enumerable.Range(0, columns * rows)
-                    .Select(index => (Col: index / rows, Row: index % rows))
-                    .First(cell => !occupied.Contains((cell.Col, cell.Row)));
-                occupied.Add((slot.Col, slot.Row));
-                result[icon.Pidl] = new IconPosition { Pidl = icon.Pidl,
-                    X = marginX + slot.Col * gridX, Y = marginY + slot.Row * gridY };
+                // Keep the actual Explorer grid pitch. The original 86px row pitch
+                // was snapped to 85px in this Windows configuration.
+                const int gridX = 76, gridY = 85, marginX = 21, marginY = 2;
+                int columns = Math.Max(1, (target.Width - marginX - 20) / gridX);
+                int rows = Math.Max(1, (target.Height - marginY - 20) / gridY);
+                int originX = target.X - virtualLeft, originY = target.Y - virtualTop;
+                int sourceVirtualLeft = donor.Displays.Min(s => s.X);
+                int sourceVirtualTop = donor.Displays.Min(s => s.Y);
+                var occupied = new HashSet<(int Col, int Row)>();
+                foreach (var placed in result.Values)
+                {
+                    int col = (int)Math.Round((placed.X - originX - marginX) / (double)gridX);
+                    int row = (int)Math.Round((placed.Y - originY - marginY) / (double)gridY);
+                    if (col >= 0 && col < columns && row >= 0 && row < rows)
+                        occupied.Add((col, row));
+                }
+
+                // Use the donor's screen membership to translate each lost icon's
+                // local coordinates onto the remaining display. This preserves
+                // original columns, rows, and relative grouping.
+                foreach (var icon in donor.Layout.Icons)
+                {
+                    if (result.ContainsKey(icon.Pidl) || occupied.Count >= columns * rows) continue;
+                    int sx = icon.X + sourceVirtualLeft;
+                    int sy = icon.Y + sourceVirtualTop;
+                    var source = donor.Displays.FirstOrDefault(d =>
+                        sx >= d.X && sx < d.X + d.Width && sy >= d.Y && sy < d.Y + d.Height);
+                    if (source == null) continue;
+
+                    int localX = sx - source.X;
+                    int localY = sy - source.Y;
+                    // Snap the transferred *row index* to the current 85px grid.
+                    // Saved multi-display positions can use 86px row spacing.
+                    int colWanted = Math.Clamp((int)Math.Round((localX - marginX) / (double)gridX), 0, columns - 1);
+                    int rowWanted = Math.Clamp((int)Math.Round((localY - marginY) / 86.0), 0, rows - 1);
+                    var slot = NearestFreeSlot(colWanted, rowWanted, columns, rows, occupied);
+                    occupied.Add(slot);
+                    result.Add(icon.Pidl, new IconPosition
+                    {
+                        Pidl = icon.Pidl,
+                        X = originX + marginX + slot.Col * gridX,
+                        Y = originY + marginY + slot.Row * gridY
+                    });
+                }
+                if (result.Count > 0) used.Add(donor.Layout.MonitorKey);
             }
-            if (result.Count > 0) used.Add(donor.Layout.MonitorKey);
         }
         if (result.Count == 0) return null;
-        return new Inherited(new Layout { MonitorKey = currentKey, Icons = result.Values.ToList(), SavedUtc = DateTime.UtcNow },
-            monitorsMatched, used.Count);
+        var output = new Layout { MonitorKey = currentKey, Icons = result.Values.ToList(), SavedUtc = DateTime.UtcNow };
+        return new Inherited(EligibleMonitorPlacement.Constrain(output, ignored), monitorsMatched, used.Count);
     }
 }

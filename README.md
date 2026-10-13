@@ -1,35 +1,30 @@
-# DeskProfiles — Smart Monitor Layouts (experimental)
+# DeskProfiles — Layout Management & Stability (experimental)
 
-Based on the latest working deletion/navigation repair build. Includes its shortcut discovery, managed-deletion cleanup and selective icon-position switching repair.
+Based on the latest corrected Smart Fallback + Topmost Loader source.
 
-## New
+## Changes
+- Global Shortcut Visibility navigation (assignments remain global and independent of monitor setup).
+- Select saved layouts per profile; rename, delete, reset-to-inheritance, or copy onto the connected monitor setup with coordinate remapping and overwrite confirmation.
+- After automatic monitor-change restoration, two delayed verify/correct passes address Explorer rearranging icons. The checks never persist fallback positions.
+- Existing shortcut discovery, managed visibility, hotkeys and independent topmost loader preserved.
 
-- Exact profile + monitor-topology layouts always take precedence, unchanged.
-- If the active profile has no saved layout for the current setup, DeskProfiles can infer positions from saved layouts that include compatible displays (matching resolution, with primary designation as a preference).
-- Positions are translated between virtual-desktop origins so adding a monitor to the left doesn't shift icons incorrectly.
-- If only one display remains, missing icons are placed in free approximate desktop-grid cells. **These fallback placements are not saved**; returning to the previous configuration restores its own original layout.
-- The profile layout page shows `Inherited` and provides **Copy inherited to this setup**. This creates an independent override for the current display setup; regular **Save current layout** records the desktop's current arrangement.
-- Saved monitor configuration layouts are never rewritten during inheritance or fallback.
+## Safety and tests
+Backup `%LOCALAPPDATA%\DeskProfiles` and exit the tray process before replacing source. Run `dotnet build` from `src/DeskProfiles`. The WPF Windows build could not be executed in this Linux environment.
 
-## Important limitation
+Copying a layout to a different monitor setup is supported only when SmartMonitorLayouts can map positions. This is a deliberate safety constraint.
 
-The current settings file identifies monitors by *geometry and primary flag*, not hardware identity/EDID. Two monitors of the same resolution cannot always be reliably distinguished as A vs B. This release preserves compatibility and does **not** migrate or rewrite existing monitor keys; hardware identity matching should be a separate future update.
-
-The automatic B-only fallback is an approximate safe arrangement, not an exact physical-monitor transfer. Some icons may need manual placement. If you save after arranging, that becomes the independent B-only layout.
-
-## Quick test
-
-1. Back up `%LOCALAPPDATA%\\DeskProfiles` and commit the current working source in Git.
-2. Exit DeskProfiles via the system tray -> Exit, then copy this source over your current project.
-3. Build on Windows using `dotnet build`, then `dotnet run`.
-4. Test a profile with an existing A+B saved layout. Disconnect A and leave B only; check whether inherited/fallback positions are used. Do not press Save during the initial test.
-5. Reconnect A; verify the original A+B layout still restores.
-6. Return to B only, arrange icons as desired and click Save current layout to create a B-only override.
-
-Not compiled or run under Windows in this environment; XAML was parsed and source was reviewed.
+To test: Open Settings → Shortcut Visibility → select original profile again; delete a disposable saved layout; confirm layouts for other setups remain. Test changing A+B → B-only, with auto-restore enabled, and wait ~5 seconds before evaluating arrangement.
 
 
-## Top-left fallback and independent progress
-- In B-only fallback with no exact layout, missing-monitor icons fill unoccupied slots top-to-bottom then left-to-right, starting at the top-left. Directly inherited icons keep their original positions. Nothing is persisted until Save.
-- Profile switching uses an independent topmost progress window even if the main window is minimized to tray. The window does not steal keyboard focus and closes after the switch. This does not bypass Windows full-screen exclusive displays or secure desktop.
-- No change to the shortcut discovery or selective restoration engine.
+## Quit lifecycle hotfix
+- Closes the standalone topmost loader on Exit instead of only hiding it.
+- Stops monitor and shortcut timers and disposes watchers/tray/hotkeys.
+- Sets WPF ShutdownMode=OnMainWindowClose and requests explicit shutdown after cleanup.
+- No changes to saved layouts, shortcut visibility, or monitor restoration.
+- Monitor reflow after a display transition remains under investigation.
+
+## Ignored monitor placement hotfix
+- Profile layout lookup now excludes positions whose current desktop coordinates lie on an ignored display (including spacedesk), relocating those icons to free grid cells on the non-ignored primary monitor for this restore only.
+- Inheritance translates targets using the full Windows virtual-desktop origin, including ignored displays, so negative-origin spacedesk screens do not shift positions.
+- Saved layouts and shortcut assignments are not changed. The exit hotfix is retained.
+- Limitation: physical monitor matching still uses display geometry; this is a placement safety fix, not hardware-ID matching.
