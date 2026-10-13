@@ -1,0 +1,70 @@
+
+# ==============================
+# DeskProfiles - .gitignore
+# ==============================
+
+# .NET build outputs
+**/bin/
+**/obj/
+**/out/
+**/publish/
+artifacts/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# VS Code
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# JetBrains Rider
+.idea/
+*.sln.iml
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+.nuget/
+
+# Test and coverage results
+TestResults/
+coverage/
+coverage-report/
+*.coverage
+*.coveragexml
+
+# Logs and temporary files
+*.log
+logs/
+*.tmp
+*.temp
+*.bak
+*.old
+*~
+
+# OS generated files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+appsettings.Development.json
+secrets.json
+
+# Local DeskProfiles state (if stored in repository)
+layouts/
+backups/
+settings.local.json
+
+# Deployment archives
+*.zip
