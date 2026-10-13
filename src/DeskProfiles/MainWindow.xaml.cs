@@ -1133,13 +1133,42 @@ public partial class MainWindow : Window
             trace.Next("Shortcut reconcile");
             SetSwitchStage("Updating desktop shortcuts");
             UpdateManagedShortcuts();
-            // Give Explorer time to show the new .lnk/.url entries in its desktop view.
-            // The desktop can legitimately include unmanaged icons, so compare only known
-            // managed item visibility; never require the entire icon count to match.
+            // Experimental fast path: a profile with no layout needs no icon positioning.
+            // When a layout exists, positioning only needs its eligible icons to be present.
+            // Do not wait for unrelated hidden items to disappear before attempting a restore.
+            // Fall back to the original conservative readiness poll if required items are missing.
             trace.Next("Explorer readiness");
-            SetSwitchStage("Waiting for Windows Explorer");
-            bool ready = !settings.EnableShortcutVisibilitySwitching || await WaitForManagedShortcutsAsync(profile, TimeSpan.FromSeconds(4));
-            trace.Note($"Explorer ready={ready}; shortcutVisibilityEnabled={settings.EnableShortcutVisibilitySwitching}");
+            SetSwitchStage("Checking Windows Explorer");
+            bool ready = true;
+            string readinessMode = "not-needed";
+            if (layout != null && settings.EnableShortcutVisibilitySwitching)
+            {
+                var hiddenForReadiness = settings.ManagedShortcuts
+                    .Where(i => i.IsManaged && !i.Shared && !profile.ShortcutIds.Contains(i.Id))
+                    .Select(i => i.DesktopFileName)
+                    .Where(n => !string.IsNullOrWhiteSpace(n)).ToArray();
+                var required = layout.Icons.Where(i => !hiddenForReadiness.Any(n => DesktopIcons.KeyMatchesFilename(i.Pidl, n))).ToList();
+                try
+                {
+                    var available = DesktopIcons.Capture().Select(i => i.Pidl)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    if (available.Count > 0 && required.All(i => available.Contains(i.Pidl)))
+                        readinessMode = "optimistic-all-target-icons-present";
+                    else
+                    {
+                        readinessMode = "conservative-fallback";
+                        SetSwitchStage("Waiting for Windows Explorer");
+                        ready = await WaitForManagedShortcutsAsync(profile, TimeSpan.FromSeconds(4));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Diagnostics.Error("Optimistic Explorer probe", ex);
+                    readinessMode = "conservative-fallback-after-error";
+                    ready = await WaitForManagedShortcutsAsync(profile, TimeSpan.FromSeconds(4));
+                }
+            }
+            trace.Note($"Explorer ready={ready}; mode={readinessMode}; shortcutVisibilityEnabled={settings.EnableShortcutVisibilitySwitching}");
             if (!ready) Log("Warning: Explorer icon inventory did not settle; only currently visible icons will be positioned.");
             trace.Next("Layout restoration and verification");
             if (layout != null)
@@ -1176,7 +1205,9 @@ public partial class MainWindow : Window
                 var finalPositions = DesktopIcons.Capture().ToDictionary(i => i.Pidl, StringComparer.OrdinalIgnoreCase);
                 matched = eligible.Count(i => finalPositions.TryGetValue(i.Pidl, out var p) && Math.Abs(p.X - i.X) <= 2 && Math.Abs(p.Y - i.Y) <= 2);
                 missing = eligible.Count(i => !finalPositions.ContainsKey(i.Pidl));
-                foreach (var line in DesktopIcons.DescribeLayoutDifferences(eligible)) trace.Note(line);
+                // Reuse the just-captured verification snapshot; another Shell enumeration
+                // here added work and could disagree if Explorer updated between reads.
+                foreach (var line in DesktopIcons.DescribeLayoutDifferences(eligible, finalPositions.Values.ToList())) trace.Note(line);
                 trace.Note($"Layout verified={matched}/{eligible.Count}; missingUnexpectedly={missing}; deliberatelyHidden={layout.Icons.Count - eligible.Count}; restoreAttempts={tries}");
                 Log($"Layout: {matched}/{eligible.Count} visible expected icons positioned; {missing} unexpectedly missing; {layout.Icons.Count - eligible.Count} intentionally hidden.");
             }
@@ -1191,10 +1222,10 @@ public partial class MainWindow : Window
             undo = before; // Retain PRE-SWITCH snapshot; retries must not replace it.
             ReloadProfiles(profile);
             RefreshDetails();
-            // Give WPF and Explorer time to paint the completed state before unlocking.
+            // Yield once for WPF's paint queue; avoid an unconditional 350ms pause
+            // after the switch operations and layout verification have finished.
             trace.Next("UI completion");
             SetSwitchStage("Finishing");
-            await System.Threading.Tasks.Task.Delay(350);
             await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
             Log($"Activated '{profile.Name}'." + (before != null ? " Undo preserves the pre-switch positions." : ""));
         }

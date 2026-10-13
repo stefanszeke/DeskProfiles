@@ -1,0 +1,11 @@
+DeskProfiles - Experimental Fast Profile Switching
+
+Based on DeskProfiles-profile-switch-performance-v1-source.zip.
+
+Changes only to MainWindow.xaml.cs profile activation:
+- Skips waiting for Explorer inventory when the target profile has no layout.
+- If a layout exists, immediately captures Explorer icons; proceeds directly when all eligible layout icons already exist.
+- If any target icon is missing, retains the original conservative 4-second readiness method.
+- Logs mode=not-needed, optimistic-all-target-icons-present, or conservative-fallback.
+
+No changes to monitor transition or inheritance code. This is an experimental test; visual verification matters more than speed alone. Build not tested on Windows here.

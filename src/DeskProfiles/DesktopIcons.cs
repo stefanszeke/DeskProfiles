@@ -176,8 +176,11 @@ internal static class DesktopIcons
     }
     // Read-only diagnostics: does not reposition any icons or alter saved layouts.
     public static IReadOnlyList<string> DescribeLayoutDifferences(IReadOnlyCollection<IconPosition> saved, int tolerance = 2)
+        => DescribeLayoutDifferences(saved, Capture(), tolerance);
+
+    // Reuse an existing Explorer snapshot to avoid a second COM shell enumeration.
+    public static IReadOnlyList<string> DescribeLayoutDifferences(IReadOnlyCollection<IconPosition> saved, IReadOnlyCollection<IconPosition> current, int tolerance = 2)
     {
-        var current = Capture();
         var byKey = current.ToDictionary(i => i.Pidl, StringComparer.OrdinalIgnoreCase);
         var result = new List<string>();
         int ok = 0, moved = 0, missing = 0;
