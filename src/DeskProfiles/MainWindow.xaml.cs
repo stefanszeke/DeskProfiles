@@ -288,6 +288,7 @@ public partial class MainWindow : Window
         RefreshShortcuts();
         HotkeyText.Text = string.IsNullOrWhiteSpace(profile.Hotkey) ? "None" : profile.Hotkey;
         HotkeyHint.Text = "Available globally while DeskProfiles is running.";
+        HotkeyHint.Visibility = Visibility.Collapsed;
         string? priorLayoutKey = (SavedLayoutsList.SelectedItem as LayoutRow)?.Key;
         var rows = profile.Layouts.Select(entry =>
         {
@@ -407,10 +408,10 @@ public partial class MainWindow : Window
             var dirs = Directory.Exists(path) ? Directory.GetDirectories(path).OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList() : new List<string>();
             foreach (var dir in dirs)
             {
-                var row = new StackPanel { Orientation = WpfOrientation.Horizontal, Margin = new Thickness(4, 3, 4, 3) };
+                var row = new StackPanel { Orientation = WpfOrientation.Horizontal, Margin = new Thickness(4, 1, 4, 1) };
                 row.Children.Add(new TextBlock { Text = "📁", Width = 27, FontSize = 14 });
                 row.Children.Add(new TextBlock { Text = Path.GetFileName(dir), FontWeight = FontWeights.SemiBold, Width = 225, TextTrimming = TextTrimming.CharacterEllipsis, ToolTip = dir });
-                row.Children.Add(new TextBlock { Text = "Real folder · Original only", Foreground = System.Windows.Media.Brushes.LightGray, FontSize = 11 });
+                row.Children.Add(new TextBlock { Text = "", Foreground = System.Windows.Media.Brushes.LightGray, FontSize = 11 });
                 OriginalFoldersPanel.Children.Add(row);
             }
             OriginalFoldersStatus.Text = $"{dirs.Count} real folder(s) at {path}. Open Original Desktop to access them. No junctions or copies are created.";
@@ -504,22 +505,30 @@ public partial class MainWindow : Window
             ShortcutMatrix.Children.Clear();
             int count = settings.Profiles.Count;
             // Widths allow horizontal scrolling for lots of profiles.
-            var heading = new StackPanel { Orientation = WpfOrientation.Horizontal, Margin = new Thickness(0, 0, 0, 6) };
-            heading.Children.Add(new TextBlock { Text = "Item (hover for type / source)", Width = 230, FontWeight = FontWeights.SemiBold });
+            var heading = new StackPanel { Orientation = WpfOrientation.Horizontal };
+            heading.Children.Add(new TextBlock { Text = "Item", Width = 230, FontWeight = FontWeights.SemiBold });
             foreach (var profile in settings.Profiles.Where(p => !SystemProfile(p)))
                 heading.Children.Add(new TextBlock { Text = profile.Name, Width = 96, TextAlignment = TextAlignment.Center, FontWeight = FontWeights.SemiBold,
                     ToolTip = profile.Name });
-            ShortcutMatrix.Children.Add(heading);
+            ShortcutMatrixHeader.Children.Clear();
+            ShortcutMatrixHeader.Children.Add(heading);
             int rowIndex = 0;
-            foreach (var item in settings.ManagedShortcuts.OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase))
+            // Put shortcuts to folders first, followed by app/file links and then URLs.
+            // Resolve types once per render to avoid repeated WScript metadata reads.
+            var rows = settings.ManagedShortcuts
+                .Select(item => (Item: item, Kind: ShortcutKind(item)))
+                .OrderBy(row => row.Kind == "Folder shortcut" ? 0 : row.Kind == "App/file shortcut" ? 1 : 2)
+                .ThenBy(row => row.Item.Name, StringComparer.OrdinalIgnoreCase);
+            foreach (var row in rows)
             {
-                var line = new StackPanel { Orientation = WpfOrientation.Horizontal, Margin = new Thickness(0, 0, 0, 2),
+                var item = row.Item;
+                var line = new StackPanel { Orientation = WpfOrientation.Horizontal, Margin = new Thickness(0, 0, 0, 0),
                     Background = (rowIndex++ % 2 == 0) ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(29, 40, 56)) : System.Windows.Media.Brushes.Transparent };
-                string kind = ShortcutKind(item);
+                string kind = row.Kind;
                 string status = item.IsManaged ? "Managed" : "Unmanaged · always visible";
-                string glyph = kind == "Folder shortcut" ? "▣" : kind == "Web shortcut" ? "◎" : "↗";
-                var label = new StackPanel { Orientation = WpfOrientation.Horizontal, Width = 230, Margin = new Thickness(5,3,0,3) };
-                label.Children.Add(new TextBlock { Text = glyph, Width = 22, FontSize = 14, VerticalAlignment = VerticalAlignment.Center,
+                string glyph = kind == "Folder shortcut" ? "📁" : kind == "Web shortcut" ? "◎" : "↗";
+                var label = new StackPanel { Orientation = WpfOrientation.Horizontal, Width = 230, Margin = new Thickness(5,1,0,1) };
+                label.Children.Add(new TextBlock { Text = glyph, Width = 22, FontSize = 14, FontFamily = new System.Windows.Media.FontFamily("Segoe UI Emoji"), VerticalAlignment = VerticalAlignment.Center,
                     Foreground = System.Windows.Media.Brushes.LightSkyBlue });
                 label.Children.Add(new TextBlock { Text = item.Name, FontSize = 12, FontWeight = FontWeights.SemiBold,
                     TextTrimming = TextTrimming.CharacterEllipsis, Width = 194, VerticalAlignment = VerticalAlignment.Center,
@@ -532,16 +541,18 @@ public partial class MainWindow : Window
                     // Indeterminate is intentionally NOT assigned. Unmanaged shortcuts remain visible
                     // until explicitly enrolled; a checked box would incorrectly suggest sharing.
                     var box = new System.Windows.Controls.CheckBox { IsThreeState = false,
-                        IsChecked = item.IsManaged && enabled, Width = 96,
-                        HorizontalContentAlignment = WpfHorizontalAlignment.Center, HorizontalAlignment = WpfHorizontalAlignment.Center,
+                        IsChecked = item.IsManaged && enabled,
+                        HorizontalAlignment = WpfHorizontalAlignment.Center,
                         VerticalAlignment = VerticalAlignment.Center, ToolTip = $"Show {item.Name} in {profile.Name}" };
                     box.Checked += (_, _) => SetShortcutVisibility(item, profile, true);
                     box.Unchecked += (_, _) => SetShortcutVisibility(item, profile, false);
-                    line.Children.Add(box);
+                    var cell = new Grid { Width = 96 };
+                    cell.Children.Add(box);
+                    line.Children.Add(cell);
                 }
                 ShortcutMatrix.Children.Add(line);
             }
-            ShortcutInventoryStatus.Text = $"{settings.ManagedShortcuts.Count} shortcuts · {settings.ManagedShortcuts.Count(i => i.IsManaged)} managed. ↗ app/file · ▣ folder shortcut · ◎ web. Hover for details. Unmanaged shortcuts remain visible until enrolled.";
+            ShortcutInventoryStatus.Text = $"{settings.ManagedShortcuts.Count} shortcuts · {settings.ManagedShortcuts.Count(i => i.IsManaged)} managed. 📁 folder · ↗ app/file · ◎ web. Hover for details. Unmanaged shortcuts remain visible until enrolled.";
         }
         finally { updatingShortcutMatrix = false; }
     }
@@ -597,7 +608,9 @@ public partial class MainWindow : Window
                         VerticalAlignment = VerticalAlignment.Center, ToolTip = $"Show folder '{folder.Name}' in {profile.Name}" };
                     box.Checked += (_, _) => SetFolderVisibility(folder, profile, true);
                     box.Unchecked += (_, _) => SetFolderVisibility(folder, profile, false);
-                    line.Children.Add(box);
+                    var cell = new Grid { Width = 96 };
+                    cell.Children.Add(box);
+                    line.Children.Add(cell);
                 }
                 FolderMatrix.Children.Add(line);
             }
@@ -1840,6 +1853,7 @@ public partial class MainWindow : Window
         recordingProfile = Selected;
         recordingHotkey = true;
         HotkeyRecordButton.Content = "Press keys...";
+        HotkeyHint.Visibility = Visibility.Visible;
         HotkeyHint.Text = "Press your shortcut (Esc cancels). Example: Alt + Shift + 1";
         PreviewKeyDown += RecordHotkey_KeyDown;
         Focus();
@@ -1851,7 +1865,7 @@ public partial class MainWindow : Window
         recordingHotkey = false;
         recordingProfile = null;
         PreviewKeyDown -= RecordHotkey_KeyDown;
-        HotkeyRecordButton.Content = "Record shortcut";
+        HotkeyRecordButton.Content = "Record";
         RefreshDetails();
     }
 

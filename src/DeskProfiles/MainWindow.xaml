@@ -1,7 +1,7 @@
 <Window x:Class="DeskProfiles.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="DeskProfiles — Layout Manager" Width="940" Height="650" MinWidth="790" MinHeight="540"
+        Title="DeskProfiles — Layout Manager" Width="980" Height="770" MinWidth="790" MinHeight="580"
         Background="#121821" Foreground="#EDF2F9" FontFamily="Segoe UI"
         WindowStartupLocation="CenterScreen" Closing="Window_Closing">
   <Window.Resources>
@@ -63,43 +63,85 @@
     </Border>
     <Grid Grid.Column="1" Margin="18,14,18,12">
       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-      <StackPanel x:Name="ProfilesHeader" Grid.Row="0" Margin="0,0,0,15">
-        <TextBlock x:Name="ProfileTitle" Text="Personal" FontSize="23" FontWeight="SemiBold"/>
-        <TextBlock x:Name="ProfileSubtitle" Text="Select a profile to see its settings" Foreground="{StaticResource Muted}" Margin="0,5,0,0"/>
-      </StackPanel>
+      <Grid x:Name="ProfilesHeader" Grid.Row="0" Margin="0,0,0,10">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <StackPanel VerticalAlignment="Center">
+          <TextBlock x:Name="ProfileTitle" Text="Personal" FontSize="23" FontWeight="SemiBold"/>
+          <TextBlock x:Name="ProfileSubtitle" Text="Select a profile" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,1,0,0"/>
+          <TextBlock x:Name="ProfileStateText" Visibility="Collapsed"/>
+        </StackPanel>
+        <WrapPanel Grid.Column="1" VerticalAlignment="Center">
+          <Button x:Name="ActivateButton" Content="Activate" Click="Activate_Click" Style="{StaticResource PrimaryButton}"/>
+          <Button x:Name="RenameButton" Content="Rename" Click="Rename_Click"/>
+          <Button x:Name="DeleteButton" Content="Delete" Click="Delete_Click"/>
+        </WrapPanel>
+      </Grid>
       <ScrollViewer x:Name="ProfilesPage" Grid.Row="1" VerticalScrollBarVisibility="Auto">
         <StackPanel>
-          <Border Background="{StaticResource Panel}" Padding="12" CornerRadius="9" Margin="0,0,0,9">
-            <StackPanel>
-              <TextBlock Text="Profile" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,12"/>
-              <TextBlock x:Name="ProfileStateText" Foreground="{StaticResource Muted}" Margin="0,0,0,9"/>
-              <WrapPanel>
-                <Button x:Name="ActivateButton" Content="Activate profile" Click="Activate_Click" Style="{StaticResource PrimaryButton}"/>
-                <Button x:Name="RenameButton" Content="Rename" Click="Rename_Click"/>
-                <Button x:Name="DeleteButton" Content="Delete" Click="Delete_Click"/>
-              </WrapPanel>
-            </StackPanel>
-          </Border>
-          <Border Background="{StaticResource Panel}" Padding="12" CornerRadius="9" Margin="0,0,0,9">
+          <Grid Margin="0,0,0,9">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="9"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <Border Grid.Column="0" Background="{StaticResource Panel}" Padding="12" CornerRadius="9" Margin="0,0,0,9">
             <StackPanel>
               <TextBlock Text="Desktop icon layout" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8"/>
               <TextBlock Text="Monitor configuration" Foreground="{StaticResource Muted}"/>
               <TextBlock x:Name="TopologyText" FontSize="13" Margin="0,4,0,8"/>
               <TextBlock x:Name="LayoutStatusText" Foreground="#A8DFB8" Margin="0,0,0,9"/>
               <WrapPanel>
-                <Button x:Name="SaveButton" Content="Save current layout" Click="Save_Click" Style="{StaticResource PrimaryButton}"/>
-                <Button x:Name="RestoreButton" Content="Restore layout" Click="Restore_Click"/>
-                <Button x:Name="CopyInheritedButton" Content="Copy inherited to this setup" Click="CopyInheritedLayout_Click"/>
-                <Button x:Name="UndoButton" Content="Undo restore" Click="Undo_Click"/>
+                <Button x:Name="SaveButton" Content="Save" Click="Save_Click" Style="{StaticResource PrimaryButton}"/>
+                <Button x:Name="RestoreButton" Content="Restore" Click="Restore_Click"/>
+                <Button x:Name="CopyInheritedButton" Content="Copy inherited" Click="CopyInheritedLayout_Click"/>
+                <Button x:Name="UndoButton" Content="Undo" Click="Undo_Click"/>
               </WrapPanel>
-              <TextBlock Text="Exact setup layouts take priority. On new setups, compatible monitor positions are inherited until you Save or Copy an independent setup layout. Undo reverses the last restore." FontSize="12" Foreground="{StaticResource Muted}" Margin="0,9,0,0"/>
+
+            </StackPanel>
+          </Border>
+            <Border Grid.Column="2" Background="{StaticResource Panel}" Padding="12" CornerRadius="9" Margin="0,0,0,9">
+            <StackPanel>
+              <TextBlock Text="Wallpaper" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8"/>
+              <CheckBox x:Name="UseWallpaperBox" Content="Custom wallpaper" Checked="WallpaperEnabled_Changed" Unchecked="WallpaperEnabled_Changed" Margin="0,0,0,9"/>
+              <TextBlock Text="Selected image" FontSize="12" Foreground="{StaticResource Muted}" Margin="0,0,0,4"/>
+              <DockPanel Margin="0,0,0,8">
+                <Button DockPanel.Dock="Right" Content="Browse..." Click="WallpaperBrowse_Click" Margin="8,0,0,0"/>
+                <TextBox x:Name="WallpaperPathBox" IsReadOnly="True" VerticalContentAlignment="Center" Background="#131B27" Foreground="#EDF2F9" BorderBrush="#3B4C62" Padding="5,3" MinHeight="27" ToolTip="Image path; the original file must remain accessible"/>
+              </DockPanel>
+              <TextBlock Text="Style" FontSize="12" Foreground="{StaticResource Muted}" Margin="0,0,0,4"/>
+              <ComboBox x:Name="WallpaperStyleBox" SelectionChanged="WallpaperStyle_Changed" Width="155" HorizontalAlignment="Left" Background="#FFFFFF" Foreground="#172536" Margin="0,0,0,10">
+                <ComboBox.ItemContainerStyle>
+                  <Style TargetType="ComboBoxItem">
+                    <Setter Property="Foreground" Value="#172536"/>
+                    <Setter Property="Background" Value="#FFFFFF"/>
+                  </Style>
+                </ComboBox.ItemContainerStyle>
+                <ComboBoxItem Content="Fill"/><ComboBoxItem Content="Fit"/><ComboBoxItem Content="Stretch"/><ComboBoxItem Content="Center"/><ComboBoxItem Content="Tile"/><ComboBoxItem Content="Span"/>
+              </ComboBox>
+              <WrapPanel>
+                <Button Content="Apply" Click="WallpaperApply_Click" Style="{StaticResource PrimaryButton}"/>
+                <Button Content="Clear" Click="WallpaperClear_Click"/>
+              </WrapPanel>
+
+            </StackPanel>
+          </Border>
+          </Grid>
+          <Border Background="{StaticResource Panel}" Padding="12,8" CornerRadius="9" Margin="0,0,0,9">
+            <StackPanel>
+            <DockPanel LastChildFill="True">
+              <WrapPanel DockPanel.Dock="Right" VerticalAlignment="Center">
+                <Button x:Name="HotkeyRecordButton" Content="Record" Click="HotkeyRecord_Click"/>
+                <Button Content="Clear" Click="HotkeyClear_Click" Margin="0"/>
+              </WrapPanel>
+              <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <TextBlock Text="Global shortcut" FontWeight="SemiBold" FontSize="13" VerticalAlignment="Center" Margin="0,0,14,0"/>
+                <TextBlock x:Name="HotkeyText" Text="None" FontWeight="SemiBold" Foreground="#A9D0FF" VerticalAlignment="Center"/>
+              </StackPanel>
+            </DockPanel>
+            <TextBlock x:Name="HotkeyHint" Text="Ctrl, Alt or Win required" Visibility="Collapsed" Foreground="{StaticResource Muted}" FontSize="11"/>
             </StackPanel>
           </Border>
           <Border Background="{StaticResource Panel}" Padding="12" CornerRadius="9" Margin="0,0,0,9">
             <StackPanel>
               <TextBlock Text="Saved monitor layouts" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8"/>
-              <TextBlock Text="Select a saved layout to manage it. Operations only affect this profile; no desktop shortcuts are deleted." Foreground="{StaticResource Muted}" FontSize="12" Margin="0,0,0,8"/>
-              <ListBox x:Name="SavedLayoutsList" Height="165" Background="#121A25" BorderBrush="#3B4C62" SelectionChanged="SavedLayoutsList_SelectionChanged">
+
+              <ListBox x:Name="SavedLayoutsList" Height="80" Background="#121A25" BorderBrush="#3B4C62" SelectionChanged="SavedLayoutsList_SelectionChanged">
                 <ListBox.ItemTemplate>
                   <DataTemplate>
                     <Border BorderBrush="#344357" BorderThickness="0,0,0,1" Padding="0,7">
@@ -117,99 +159,53 @@
               </WrapPanel>
             </StackPanel>
           </Border>
-          <Border Background="{StaticResource Panel}" Padding="12" CornerRadius="9" Margin="0,0,0,9">
-            <StackPanel>
-              <TextBlock Text="Wallpaper" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8"/>
-              <CheckBox x:Name="UseWallpaperBox" Content="Use a custom wallpaper for this profile" Checked="WallpaperEnabled_Changed" Unchecked="WallpaperEnabled_Changed" Margin="0,0,0,9"/>
-              <TextBlock Text="Selected image" FontSize="12" Foreground="{StaticResource Muted}" Margin="0,0,0,4"/>
-              <DockPanel Margin="0,0,0,8">
-                <Button DockPanel.Dock="Right" Content="Browse..." Click="WallpaperBrowse_Click" Margin="8,0,0,0"/>
-                <TextBox x:Name="WallpaperPathBox" IsReadOnly="True" VerticalContentAlignment="Center" Background="#131B27" Foreground="#EDF2F9" BorderBrush="#3B4C62" Padding="5,3" MinHeight="27" ToolTip="Image path; the original file must remain accessible"/>
-              </DockPanel>
-              <TextBlock Text="Style" FontSize="12" Foreground="{StaticResource Muted}" Margin="0,0,0,4"/>
-              <ComboBox x:Name="WallpaperStyleBox" SelectionChanged="WallpaperStyle_Changed" Width="155" HorizontalAlignment="Left" Background="#FFFFFF" Foreground="#172536" Margin="0,0,0,10">
-                <ComboBox.ItemContainerStyle>
-                  <Style TargetType="ComboBoxItem">
-                    <Setter Property="Foreground" Value="#172536"/>
-                    <Setter Property="Background" Value="#FFFFFF"/>
-                  </Style>
-                </ComboBox.ItemContainerStyle>
-                <ComboBoxItem Content="Fill"/><ComboBoxItem Content="Fit"/><ComboBoxItem Content="Stretch"/><ComboBoxItem Content="Center"/><ComboBoxItem Content="Tile"/><ComboBoxItem Content="Span"/>
-              </ComboBox>
-              <WrapPanel>
-                <Button Content="Apply now" Click="WallpaperApply_Click" Style="{StaticResource PrimaryButton}"/>
-                <Button Content="Clear image" Click="WallpaperClear_Click"/>
-              </WrapPanel>
-              <TextBlock Text="Activating a profile applies its wallpaper across the Windows desktop, regardless of monitor setup. Disabling this option leaves the current wallpaper unchanged." FontSize="12" Foreground="{StaticResource Muted}" Margin="0,9,0,0"/>
-            </StackPanel>
-          </Border>
-          <Border Background="{StaticResource Panel}" Padding="12" CornerRadius="9" Margin="0,0,0,9">
-            <StackPanel>
-              <TextBlock Text="Global keyboard shortcut" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8"/>
-              <TextBlock Text="Activate this profile from any app while DeskProfiles runs." Foreground="{StaticResource Muted}" FontSize="12" Margin="0,0,0,10"/>
-              <WrapPanel VerticalAlignment="Center">
-                <TextBlock x:Name="HotkeyText" Text="None" VerticalAlignment="Center" MinWidth="165" FontWeight="SemiBold"/>
-                <Button x:Name="HotkeyRecordButton" Content="Record shortcut" Click="HotkeyRecord_Click"/>
-                <Button Content="Clear" Click="HotkeyClear_Click"/>
-              </WrapPanel>
-              <TextBlock x:Name="HotkeyHint" Text="Shortcut must include Ctrl, Alt, or Win. Shift alone is not sufficient." Foreground="{StaticResource Muted}" FontSize="12" Margin="0,8,0,0"/>
-            </StackPanel>
-          </Border>
+
 
         </StackPanel>
       </ScrollViewer>
 
-      <ScrollViewer x:Name="ShortcutsPage" Grid.Row="1" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
-        <StackPanel>
-          <TextBlock Text="Desktop Items · Visibility" FontSize="23" FontWeight="SemiBold" Margin="0,0,0,4"/>
-          <TextBlock Text="Real folders are listed first. Shortcut icons: ↗ app/file, ▣ folder link, ◎ web. Original Desktop always displays its real contents." Foreground="{StaticResource Muted}" Margin="0,0,0,16"/>
-          <Border Background="{StaticResource Panel}" Padding="12" CornerRadius="9" Margin="0,0,0,9">
-            <StackPanel>
-              <Separator Margin="0,14,0,12"/>
-              <TextBlock Text="Real folders · Original Desktop" FontWeight="SemiBold" FontSize="15" Margin="0,0,0,4"/>
-              <TextBlock Text="These are actual folders, not shortcuts. They appear when you select Original Desktop; other profiles contain their assigned shortcuts." Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,8"/>
-              <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="160" Background="#121A25" Margin="0,0,0,6"><StackPanel x:Name="OriginalFoldersPanel" Margin="4"/></ScrollViewer>
-              <TextBlock x:Name="OriginalFoldersStatus" Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,7"/>
-              <TextBlock Text="Desktop shortcut library" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8"/>
-              <TextBlock Text="Managed shortcuts follow profile assignments. Unmanaged desktop items stay visible in all profiles." Foreground="{StaticResource Muted}" FontSize="12" Margin="0,0,0,9"/>
-              <WrapPanel Margin="0,0,0,8">
-                <Button Content="Scan desktop..." Click="ShortcutScan_Click"/>
-                <Button Content="Import .lnk / .url" Click="ShortcutImport_Click"/>
-                <Button Content="Shortcut to folder..." Click="ShortcutFolder_Click"/>
-              </WrapPanel>
-              <TextBlock Text="Shortcuts · Select profiles" FontWeight="SemiBold" Margin="0,6,0,6"/>
-              <TextBlock Text="Check the profiles where each shortcut should appear. Changes save immediately; activation is not required to edit." Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,7"/>
-              <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" MaxHeight="360" Background="#121A25" Margin="0,0,0,7">
-                <StackPanel x:Name="ShortcutMatrix" Margin="4"/>
-              </ScrollViewer>
-              <WrapPanel Margin="0,0,0,8">
-                <Button Content="Refresh desktop shortcuts" Click="ShortcutInventoryRefresh_Click"/>
-                <Button Content="Restore all managed shortcuts" Click="ShortcutsRestoreAll_Click"/>
-              </WrapPanel>
-              <TextBlock Text="Folders: open Original Desktop to access your actual folders. Shortcut entries (↗) are separate .lnk/.url files. Unmanaged = visible in every profile. On the first visibility edit, DeskProfiles asks permission to manage the original desktop shortcut. Real files and folders never move." Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,8"/>
-              <StackPanel Visibility="Collapsed">
-              <ListBox x:Name="ShortcutList" Height="130" Background="#121A25" BorderBrush="#3B4C62" SelectionChanged="ShortcutList_SelectionChanged" DisplayMemberPath="Description"/>
-              <WrapPanel Margin="0,9,0,0">
-                <Button x:Name="ShortcutAssignButton" Click="ShortcutAssign_Click" Content="Show in this profile"/>
-                <Button x:Name="ShortcutSharedButton" Click="ShortcutShared_Click" Content="Set shared"/>
-                <Button x:Name="ShortcutManageButton" Content="Manage selected desktop shortcut" Click="ShortcutManage_Click"/>
-                <Button Content="Remove from library" Click="ShortcutRemove_Click"/>
-              </WrapPanel>
-              <TextBlock x:Name="ShortcutStatusText" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,8,0,0"/>
-              </StackPanel>
-              <TextBlock x:Name="ShortcutInventoryStatus" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,6,0,0"/>
-              <Separator Visibility="Collapsed" Margin="0,16,0,13"/>
-              <TextBlock Visibility="Collapsed" Text="Shared desktop folders (whole-Desktop experiment)" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,7"/>
-              <TextBlock Visibility="Collapsed" Text="Enroll real folders from your original Desktop. They remain in place; safe folder junctions are shown in selected profiles. Shared by default. Changes apply on the next profile switch." Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,9"/>
-              <Button Visibility="Collapsed" Content="Add a folder from original Desktop..." Click="FolderInventory_Click" HorizontalAlignment="Left" Margin="0,0,0,9"/>
-              <ScrollViewer Visibility="Collapsed" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" MaxHeight="210" Background="#121A25" Margin="0,0,0,7">
-                <StackPanel x:Name="FolderMatrix" Margin="4"/>
-              </ScrollViewer>
-              <TextBlock Visibility="Collapsed" x:Name="FolderInventoryStatus" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,5,0,0"/>
-            </StackPanel>
-          </Border>
+      <Grid x:Name="ShortcutsPage" Grid.Row="1" Visibility="Collapsed">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <DockPanel Grid.Row="0" Margin="0,0,0,8">
+          <WrapPanel DockPanel.Dock="Right" VerticalAlignment="Center">
+            <Button Content="Scan" Click="ShortcutScan_Click"/>
+            <Button Content="Import" Click="ShortcutImport_Click"/>
+            <Button Content="Folder shortcut" Click="ShortcutFolder_Click" Margin="0"/>
+          </WrapPanel>
+          <TextBlock Text="Desktop Items" FontSize="23" FontWeight="SemiBold" VerticalAlignment="Center"/>
+        </DockPanel>
+        <Border Grid.Row="1" Background="{StaticResource Panel}" Padding="8" CornerRadius="7" Margin="0,0,0,8">
+          <DockPanel>
+            <TextBlock Text="Real folders · Original Desktop only" Foreground="{StaticResource Muted}" FontSize="12" DockPanel.Dock="Top" Margin="2,0,0,4"/>
+            <StackPanel x:Name="OriginalFoldersPanel"/>
+          </DockPanel>
+        </Border>
+        <Border Grid.Row="2" Background="#273648" Padding="4" CornerRadius="5,5,0,0">
+          <StackPanel x:Name="ShortcutMatrixHeader"/>
+        </Border>
+        <ScrollViewer Grid.Row="3" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" Background="#121A25">
+          <StackPanel x:Name="ShortcutMatrix" Margin="4,1,4,1"/>
+        </ScrollViewer>
+        <DockPanel Grid.Row="4" Margin="0,7,0,0">
+          <WrapPanel DockPanel.Dock="Right">
+            <Button Content="Refresh" Click="ShortcutInventoryRefresh_Click"/>
+            <Button Content="Restore managed" Click="ShortcutsRestoreAll_Click" Margin="0"/>
+          </WrapPanel>
+          <TextBlock x:Name="ShortcutInventoryStatus" Foreground="{StaticResource Muted}" FontSize="11" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+        </DockPanel>
+        <StackPanel Visibility="Collapsed">
+          <TextBlock x:Name="OriginalFoldersStatus"/>
+          <ListBox x:Name="ShortcutList" SelectionChanged="ShortcutList_SelectionChanged"/>
+          <Button x:Name="ShortcutAssignButton" Click="ShortcutAssign_Click"/>
+          <Button x:Name="ShortcutSharedButton" Click="ShortcutShared_Click"/>
+          <Button x:Name="ShortcutManageButton" Click="ShortcutManage_Click"/>
+          <Button Click="ShortcutRemove_Click"/>
+          <TextBlock x:Name="ShortcutStatusText"/>
+          <StackPanel x:Name="FolderMatrix"/>
+          <TextBlock x:Name="FolderInventoryStatus"/>
+          <Button Click="FolderInventory_Click"/>
         </StackPanel>
-      </ScrollViewer>
+      </Grid>
       <ScrollViewer x:Name="SettingsPage" Grid.Row="1" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
         <StackPanel>
           <TextBlock Text="Settings" FontSize="23" FontWeight="SemiBold" Margin="0,0,0,4"/>
