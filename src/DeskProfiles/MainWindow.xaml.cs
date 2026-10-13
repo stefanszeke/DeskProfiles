@@ -3,12 +3,23 @@ using System.IO;
 using System.Diagnostics;
 using System.Windows.Controls;
 using System.Windows.Threading;
+using System.Windows.Input;
+using WpfKey = System.Windows.Input.Key;
+using System.Windows.Interop;
+using System.Runtime.InteropServices;
+using Forms = System.Windows.Forms;
 
 namespace DeskProfiles;
 
 public partial class MainWindow : Window
 {
     readonly Settings settings;
+    HotkeyManager? hotkeys;
+    Forms.NotifyIcon? tray;
+    bool reallyExit;
+    bool recordingHotkey;
+    Profile? recordingProfile;
+
     readonly DispatcherTimer monitorTimer;
     string currentTopology;
     string pendingTopology;
@@ -97,6 +108,7 @@ public partial class MainWindow : Window
         pendingSince = DateTime.UtcNow;
         ReloadProfiles(Active);
         AutoRestoreBox.IsChecked = settings.AutoRestore;
+        StartWithWindowsBox.IsChecked = StartupRegistration.IsEnabled();
         loading = false;
         RefreshMonitors();
         RefreshDetails();
@@ -104,6 +116,7 @@ public partial class MainWindow : Window
         monitorTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         monitorTimer.Tick += MonitorTimer_Tick;
         monitorTimer.Start();
+        Loaded += (_, _) => InitializeTrayAndHotkeys();
     }
 
     void ShowPage(string page)
@@ -174,6 +187,8 @@ public partial class MainWindow : Window
             ? $"Saved for this setup · {layout.Icons.Count} icons · {layout.SavedUtc.ToLocalTime():g}"
             : "No saved layout for this monitor configuration.";
         RefreshWallpaper();
+        HotkeyText.Text = string.IsNullOrWhiteSpace(profile.Hotkey) ? "None" : profile.Hotkey;
+        HotkeyHint.Text = "Available globally while DeskProfiles is running.";
         SavedLayoutsList.ItemsSource = profile.Layouts.Values.OrderByDescending(l => l.SavedUtc)
             .Select(l => new LayoutRow(MonitorIdentity.MatchKey(l.MonitorKey, settings.IgnoredMonitors) == currentTopology ? "● Current monitor setup" : "Saved monitor setup",
                 $"{MonitorIdentity.DescribeKey(l.MonitorKey)}  ·  {l.Icons.Count} icons  ·  {l.SavedUtc.ToLocalTime():g}"))
@@ -291,9 +306,10 @@ public partial class MainWindow : Window
         if (!loading && ProfileList.SelectedItem != null) { RefreshDetails(); ShowPage("profiles"); }
     }
 
-    void Activate_Click(object sender, RoutedEventArgs e)
+    void Activate_Click(object sender, RoutedEventArgs e) => ActivateProfile(Selected);
+
+    void ActivateProfile(Profile profile)
     {
-        var profile = Selected;
         if (ReferenceEquals(profile, Active)) return;
         var previous = settings.ActiveProfile;
         try
@@ -369,7 +385,7 @@ public partial class MainWindow : Window
         {
             settings.Profiles.Remove(profile);
             if (oldActive == profile.Name) settings.ActiveProfile = settings.Profiles[0].Name;
-            Persist(); undo = null; ReloadProfiles(Active); Log($"Deleted profile '{profile.Name}' (saved layouts removed). Desktop files unchanged.");
+            Persist(); hotkeys?.Sync(settings.Profiles); undo = null; ReloadProfiles(Active); Log($"Deleted profile '{profile.Name}' (saved layouts removed). Desktop files unchanged.");
         }
         catch (Exception ex)
         { settings.Profiles.Insert(index, profile); settings.ActiveProfile = oldActive; ReloadProfiles(profile); Error(ex); }
@@ -419,6 +435,22 @@ public partial class MainWindow : Window
         catch (Exception ex) { Error(ex); }
     }
 
+    void StartWithWindows_Changed(object sender, RoutedEventArgs e)
+    {
+        if (loading) return;
+        bool enabled = StartWithWindowsBox.IsChecked == true;
+        try
+        {
+            StartupRegistration.SetEnabled(enabled);
+            Log(enabled ? "Start with Windows enabled (launch hidden in tray)." : "Start with Windows disabled.");
+        }
+        catch (Exception ex)
+        {
+            StartWithWindowsBox.IsChecked = StartupRegistration.IsEnabled();
+            Error(ex);
+        }
+    }
+
     void AutoRestore_Changed(object sender, RoutedEventArgs e)
     {
         if (loading) return;
@@ -440,6 +472,139 @@ public partial class MainWindow : Window
         RefreshDetails();
         Log("Stable monitor configuration change detected.");
         if (settings.AutoRestore) RestoreCurrent();
+    }
+
+    void InitializeTrayAndHotkeys()
+    {
+        try
+        {
+            hotkeys = new HotkeyManager(this, p => ActivateProfile(p), message => Log(message));
+            hotkeys.Sync(settings.Profiles);
+            tray = new Forms.NotifyIcon
+            {
+                Text = "DeskProfiles",
+                Icon = System.Drawing.SystemIcons.Application,
+                Visible = true,
+                ContextMenuStrip = new Forms.ContextMenuStrip()
+            };
+            tray.DoubleClick += (_, _) => ShowFromTray();
+            tray.ContextMenuStrip.Items.Add("Open DeskProfiles", null, (_, _) => Dispatcher.Invoke(ShowFromTray));
+            tray.ContextMenuStrip.Items.Add("Exit DeskProfiles", null, (_, _) => Dispatcher.Invoke(() => { reallyExit = true; Close(); }));
+            Log("Global shortcuts registered where available. Closing the window minimizes to tray.");
+            if (Environment.GetCommandLineArgs().Any(a => a.Equals("--startup", StringComparison.OrdinalIgnoreCase)))
+            {
+                // Wait until tray is created before hiding. The app stays running and hotkeys remain registered.
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    Hide();
+                    ShowInTaskbar = false;
+                    Log("Started with Windows; window hidden in system tray.");
+                }), DispatcherPriority.Loaded);
+            }
+        }
+        catch (Exception ex) { Error(ex); }
+    }
+
+    void ShowFromTray()
+    {
+        ShowInTaskbar = true;
+        Show();
+        WindowState = WindowState.Normal;
+        Activate();
+    }
+
+    void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
+    {
+        if (!reallyExit)
+        {
+            e.Cancel = true;
+            Hide();
+            return;
+        }
+        hotkeys?.Dispose();
+        if (tray != null)
+        {
+            tray.Visible = false;
+            tray.Dispose();
+        }
+    }
+
+    void HotkeyRecord_Click(object sender, RoutedEventArgs e)
+    {
+        recordingProfile = Selected;
+        recordingHotkey = true;
+        HotkeyRecordButton.Content = "Press keys...";
+        HotkeyHint.Text = "Press your shortcut (Esc cancels). Example: Alt + Shift + 1";
+        PreviewKeyDown += RecordHotkey_KeyDown;
+        Focus();
+        Keyboard.Focus(HotkeyRecordButton);
+    }
+
+    void StopHotkeyRecording()
+    {
+        recordingHotkey = false;
+        recordingProfile = null;
+        PreviewKeyDown -= RecordHotkey_KeyDown;
+        HotkeyRecordButton.Content = "Record shortcut";
+        RefreshDetails();
+    }
+
+    void RecordHotkey_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (!recordingHotkey || recordingProfile == null) return;
+        e.Handled = true;
+        var key = e.Key == WpfKey.System ? e.SystemKey : e.Key;
+        if (key == WpfKey.Escape) { StopHotkeyRecording(); return; }
+        if (key is WpfKey.LeftShift or WpfKey.RightShift or WpfKey.LeftCtrl or WpfKey.RightCtrl or WpfKey.LeftAlt or WpfKey.RightAlt or WpfKey.LWin or WpfKey.RWin) return;
+        var mods = Keyboard.Modifiers;
+        if ((mods & (ModifierKeys.Control | ModifierKeys.Alt | ModifierKeys.Windows)) == 0)
+        {
+            HotkeyHint.Text = "Include Ctrl, Alt or Win (Shift alone isn't sufficient).";
+            return;
+        }
+        var candidate = HotkeyManager.Format(mods, key);
+        var target = recordingProfile;
+        var conflict = settings.Profiles.FirstOrDefault(p => !ReferenceEquals(p, target) && p.Hotkey.Equals(candidate, StringComparison.OrdinalIgnoreCase));
+        if (conflict != null) { HotkeyHint.Text = $"Already assigned to '{conflict.Name}'. Press another shortcut or Esc."; return; }
+        var previous = target.Hotkey;
+        try
+        {
+            // First test the OS registration. On failure, put back the old shortcut.
+            target.Hotkey = candidate;
+            if (hotkeys != null && !hotkeys.Sync(settings.Profiles, out var failure))
+            {
+                target.Hotkey = previous;
+                hotkeys.Sync(settings.Profiles);
+                HotkeyHint.Text = $"Unavailable: {failure}. Press another shortcut or Esc.";
+                return;
+            }
+            Persist();
+            Log($"Assigned {candidate} to '{target.Name}'.");
+            StopHotkeyRecording();
+        }
+        catch (Exception ex)
+        {
+            target.Hotkey = previous;
+            hotkeys?.Sync(settings.Profiles);
+            StopHotkeyRecording();
+            Error(ex);
+        }
+    }
+
+    void HotkeyClear_Click(object sender, RoutedEventArgs e)
+    {
+        if (recordingHotkey) StopHotkeyRecording();
+        var target = Selected;
+        var previous = target.Hotkey;
+        try
+        {
+            target.Hotkey = "";
+            hotkeys?.Sync(settings.Profiles);
+            Persist();
+            RefreshDetails();
+            Log($"Cleared shortcut for '{target.Name}'.");
+        }
+        catch (Exception ex) { target.Hotkey = previous; hotkeys?.Sync(settings.Profiles); Error(ex); }
     }
 
     void Error(Exception ex)

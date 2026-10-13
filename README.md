@@ -83,3 +83,16 @@ The initial wallpaper backend uses the Windows user wallpaper setting; it applie
 - Fix `List<string>.Length` compilation error in monitor layout descriptions (`.Count`).
 - Make wallpaper style dropdown text readable by using dark text on a light popup.
 - Wallpaper disabled continues to leave Windows wallpaper unchanged.
+
+
+## v0.2.7 — global shortcuts and tray
+
+Select a profile, press **Record shortcut**, then press a combination including Ctrl, Alt or Win (e.g. Alt+Shift+1). Press Esc to cancel; Clear removes it. Shortcuts work while DeskProfiles is running, including when hidden. If registration fails due to a conflict, no new binding is saved. A global shortcut activates its target profile without focusing the app.
+
+Closing the window hides it to the system tray. Double-click tray icon to show it; right-click and choose **Exit DeskProfiles** to actually quit. Windows startup is not enabled. This is a Windows-only source build and still needs compilation and runtime testing.
+
+## v0.2.7 — Start with Windows
+
+In **Settings → Startup & tray**, enable **Start DeskProfiles when I sign in to Windows**. This registers the current build's `DeskProfiles.exe` in the current user's `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` registry key with a `--startup` argument. Windows starts the app hidden in the tray; global profile shortcuts work without opening the window. Disable the checkbox to remove the entry. No admin permissions required.
+
+**If you move or rebuild to a new output path**, disable and re-enable startup from the new build so Windows points to the new executable. For daily use, publish to a stable directory instead of relying on `bin\Debug`. No profile data or layouts are migrated or deleted. The hotkey property is `Profile.Hotkey`; the WPF Key enum is aliased `WpfKey`.

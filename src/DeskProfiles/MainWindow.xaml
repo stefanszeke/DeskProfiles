@@ -1,9 +1,9 @@
 <Window x:Class="DeskProfiles.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="DeskProfiles v0.2.5.1" Width="940" Height="650" MinWidth="790" MinHeight="540"
+        Title="DeskProfiles v0.2.6" Width="940" Height="650" MinWidth="790" MinHeight="540"
         Background="#121821" Foreground="#EDF2F9" FontFamily="Segoe UI"
-        WindowStartupLocation="CenterScreen">
+        WindowStartupLocation="CenterScreen" Closing="Window_Closing">
   <Window.Resources>
     <SolidColorBrush x:Key="Panel" Color="#1D2632"/>
     <SolidColorBrush x:Key="Muted" Color="#B5C1D1"/>
@@ -35,7 +35,7 @@
       <DockPanel Margin="12,16,10,12">
         <StackPanel DockPanel.Dock="Top" Margin="0,0,0,25">
           <TextBlock Text="DeskProfiles" FontSize="23" FontWeight="SemiBold"/>
-          <TextBlock Text="Desktop layout manager · v0.2.5.1" Margin="0,5,0,0" Foreground="{StaticResource Muted}" FontSize="12"/>
+          <TextBlock Text="Desktop layout manager · v0.2.6" Margin="0,5,0,0" Foreground="{StaticResource Muted}" FontSize="12"/>
         </StackPanel>
         <StackPanel DockPanel.Dock="Bottom">
           <Button Content="+ New profile" Click="AddProfile_Click" Margin="0,0,0,12"/>
@@ -136,6 +136,18 @@
           </Border>
           <Border Background="{StaticResource Panel}" Padding="12" CornerRadius="9" Margin="0,0,0,9">
             <StackPanel>
+              <TextBlock Text="Global keyboard shortcut" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8"/>
+              <TextBlock Text="Activate this profile from any app while DeskProfiles runs." Foreground="{StaticResource Muted}" FontSize="12" Margin="0,0,0,10"/>
+              <WrapPanel VerticalAlignment="Center">
+                <TextBlock x:Name="HotkeyText" Text="None" VerticalAlignment="Center" MinWidth="165" FontWeight="SemiBold"/>
+                <Button x:Name="HotkeyRecordButton" Content="Record shortcut" Click="HotkeyRecord_Click"/>
+                <Button Content="Clear" Click="HotkeyClear_Click"/>
+              </WrapPanel>
+              <TextBlock x:Name="HotkeyHint" Text="Shortcut must include Ctrl, Alt, or Win. Shift alone is not sufficient." Foreground="{StaticResource Muted}" FontSize="12" Margin="0,8,0,0"/>
+            </StackPanel>
+          </Border>
+          <Border Background="{StaticResource Panel}" Padding="12" CornerRadius="9" Margin="0,0,0,9">
+            <StackPanel>
               <TextBlock Text="Coming next" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8"/>
               <TextBlock Text="Per-profile icon visibility is planned, not active yet." Foreground="{StaticResource Muted}"/>
             </StackPanel>
@@ -182,7 +194,8 @@
           <Border Background="{StaticResource Panel}" Padding="12" CornerRadius="9" Margin="0,0,0,9">
             <StackPanel>
               <TextBlock Text="Startup &amp; tray" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,10"/>
-              <TextBlock Text="Run with Windows and minimize to tray are planned for a future version. No startup changes are made by v0.2.5.1." Foreground="{StaticResource Muted}"/>
+              <CheckBox x:Name="StartWithWindowsBox" Content="Start DeskProfiles when I sign in to Windows" Checked="StartWithWindows_Changed" Unchecked="StartWithWindows_Changed"/>
+              <TextBlock Text="Starts hidden in the system tray, with profile shortcuts available. Closing the window still minimizes to tray; right-click the tray icon to exit." TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,8,0,0"/>
             </StackPanel>
           </Border>
           <Border Background="{StaticResource Panel}" Padding="12" CornerRadius="9" Margin="0,0,0,9">
