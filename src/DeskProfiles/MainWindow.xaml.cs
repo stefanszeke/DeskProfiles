@@ -22,6 +22,7 @@ public partial class MainWindow : Window
     bool reallyExit;
     bool recordingHotkey;
     bool switchingProfile;
+    SwitchLoadingWindow? switchLoadingWindow;
     FileSystemWatcher? desktopWatcher;
     readonly HashSet<string> newDesktopShortcuts = new(StringComparer.OrdinalIgnoreCase);
     readonly DispatcherTimer shortcutWatchTimer = new() { Interval = TimeSpan.FromMilliseconds(850) };
@@ -54,13 +55,44 @@ public partial class MainWindow : Window
     bool updatingWallpaper;
     sealed record ShortcutRow(ManagedShortcut Item, string Description);
     string Key() => MonitorIdentity.Key(settings.IgnoredMonitors);
-    Layout? FindLayout(Profile profile)
+    Layout? FindExactLayout(Profile profile)
     {
         if (profile.Layouts.TryGetValue(currentTopology, out var direct)) return direct;
-        // Historical keys may contain an optional ignored display. Never delete them.
         return profile.Layouts.Values.Where(l => MonitorIdentity.MatchKey(l.MonitorKey, settings.IgnoredMonitors) == currentTopology)
             .OrderByDescending(l => l.SavedUtc).FirstOrDefault();
     }
+
+    Layout? FindLayout(Profile profile) => FindExactLayout(profile)
+        ?? SmartMonitorLayouts.TryCreate(profile, currentTopology, settings.IgnoredMonitors)?.Layout;
+
+    void CopyInheritedLayout_Click(object sender, RoutedEventArgs e)
+    {
+        if (switchingProfile || !ReferenceEquals(Selected, Active)) return;
+        if (FindExactLayout(Active) != null)
+        {
+            Log("This profile already has a saved layout for the current monitor setup. Nothing copied.");
+            return;
+        }
+        var inherited = SmartMonitorLayouts.TryCreate(Active, currentTopology, settings.IgnoredMonitors);
+        if (inherited == null)
+        {
+            Log("No compatible saved monitor positions are available to copy.");
+            return;
+        }
+        try
+        {
+            Active.Layouts[currentTopology] = new Layout
+            {
+                MonitorKey = currentTopology,
+                Icons = inherited.Layout.Icons.Select(i => new IconPosition { Pidl = i.Pidl, X = i.X, Y = i.Y }).ToList()
+            };
+            Persist();
+            Log($"Copied {inherited.Layout.Icons.Count} inherited icon positions into an independent layout for this monitor setup. Use Save after arranging any remaining icons.");
+            RefreshDetails();
+        }
+        catch (Exception ex) { Error(ex); }
+    }
+
     void RefreshMonitors()
     {
         updatingMonitors = true;
@@ -208,9 +240,15 @@ public partial class MainWindow : Window
         RestoreButton.IsEnabled = active && FindLayout(profile) != null;
         UndoButton.IsEnabled = undo != null;
         TopologyText.Text = MonitorIdentity.Description(settings.IgnoredMonitors);
-        LayoutStatusText.Text = FindLayout(profile) is { } layout
-            ? $"Saved for this setup · {layout.Icons.Count} icons · {layout.SavedUtc.ToLocalTime():g}"
-            : "No saved layout for this monitor configuration.";
+        var exactLayout = FindExactLayout(profile);
+        var inheritedLayout = exactLayout == null
+            ? SmartMonitorLayouts.TryCreate(profile, currentTopology, settings.IgnoredMonitors) : null;
+        LayoutStatusText.Text = exactLayout != null
+            ? $"Saved for this setup · {exactLayout.Icons.Count} icons · {exactLayout.SavedUtc.ToLocalTime():g}"
+            : inheritedLayout != null
+                ? $"Inherited · {inheritedLayout.Layout.Icons.Count} positions across {inheritedLayout.MatchedMonitors} matched monitor(s). Save to override."
+                : "No compatible layout for this monitor configuration.";
+        CopyInheritedButton.IsEnabled = active && exactLayout == null && inheritedLayout != null;
         RefreshWallpaper();
         RefreshShortcuts();
         HotkeyText.Text = string.IsNullOrWhiteSpace(profile.Hotkey) ? "None" : profile.Hotkey;
@@ -954,6 +992,11 @@ public partial class MainWindow : Window
         if (!loading && ProfileList.SelectedItem != null) { RefreshDetails(); ShowPage("profiles"); }
     }
 
+    void SetSwitchStage(string message)
+    {
+        switchLoadingWindow?.SetStage(message);
+    }
+
     void Activate_Click(object sender, RoutedEventArgs e) => _ = ActivateProfileAsync(Selected);
 
     // Called from both the UI and global hotkeys. Never allow two switches to overlap.
@@ -964,10 +1007,12 @@ public partial class MainWindow : Window
         if (switchingProfile || ReferenceEquals(profile, Active)) return;
         switchingProfile = true;
         lastShortcutReconcileUtc = DateTime.UtcNow;
-        SwitchOverlay.Visibility = Visibility.Visible;
-        SwitchTitle.Text = $"Switching to {profile.Name}…";
-        SwitchStage.Text = "Preparing shortcuts";
-        SwitchProgress.IsIndeterminate = true;
+        try
+        {
+            switchLoadingWindow ??= new SwitchLoadingWindow();
+            switchLoadingWindow.Begin(profile.Name);
+        }
+        catch (Exception ex) { Diagnostics.Error("Could not show switch loader", ex); }
         Log($"Switch started: {Active.Name} -> {profile.Name} ({currentTopology})");
         var previous = settings.ActiveProfile;
         List<IconPosition>? before = null;
@@ -980,6 +1025,8 @@ public partial class MainWindow : Window
             await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
             trace.Next("Pre-switch capture and validation");
             var layout = FindLayout(profile);
+            if (layout != null && FindExactLayout(profile) == null)
+                trace.Note($"Smart monitor inheritance: {layout.Icons.Count} icon position(s) from compatible saved monitor layout(s).");
             if (layout != null)
             {
                 before = DesktopIcons.Capture();
@@ -990,20 +1037,20 @@ public partial class MainWindow : Window
             Persist();
             committed = true;
             trace.Next("Shortcut reconcile");
-            SwitchStage.Text = "Updating desktop shortcuts";
+            SetSwitchStage("Updating desktop shortcuts");
             UpdateManagedShortcuts();
             // Give Explorer time to show the new .lnk/.url entries in its desktop view.
             // The desktop can legitimately include unmanaged icons, so compare only known
             // managed item visibility; never require the entire icon count to match.
             trace.Next("Explorer readiness");
-            SwitchStage.Text = "Waiting for Windows Explorer";
+            SetSwitchStage("Waiting for Windows Explorer");
             bool ready = !settings.EnableShortcutVisibilitySwitching || await WaitForManagedShortcutsAsync(profile, TimeSpan.FromSeconds(4));
             trace.Note($"Explorer ready={ready}; shortcutVisibilityEnabled={settings.EnableShortcutVisibilitySwitching}");
             if (!ready) Log("Warning: Explorer icon inventory did not settle; only currently visible icons will be positioned.");
             trace.Next("Layout restoration and verification");
             if (layout != null)
             {
-                SwitchStage.Text = "Restoring icon positions";
+                SetSwitchStage("Restoring icon positions");
                 // Hidden managed shortcuts may still have historical positions in this saved layout.
                 // They are not restoration failures. Never delete those saved entries.
                 var hiddenFiles = settings.EnableShortcutVisibilitySwitching
@@ -1041,7 +1088,7 @@ public partial class MainWindow : Window
             }
             else Log($"No saved layout for '{profile.Name}' on this monitor setup; icon positions unchanged.");
             trace.Next("Wallpaper");
-            SwitchStage.Text = "Applying wallpaper";
+            SetSwitchStage("Applying wallpaper");
             if (profile.UseCustomWallpaper)
             {
                 try { WallpaperService.Apply(profile); }
@@ -1052,7 +1099,7 @@ public partial class MainWindow : Window
             RefreshDetails();
             // Give WPF and Explorer time to paint the completed state before unlocking.
             trace.Next("UI completion");
-            SwitchStage.Text = "Finishing";
+            SetSwitchStage("Finishing");
             await System.Threading.Tasks.Task.Delay(350);
             await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
             Log($"Activated '{profile.Name}'." + (before != null ? " Undo preserves the pre-switch positions." : ""));
@@ -1071,7 +1118,7 @@ public partial class MainWindow : Window
         finally
         {
             trace.Finish();
-            SwitchOverlay.Visibility = Visibility.Collapsed;
+            switchLoadingWindow?.Hide();
             switchingProfile = false;
             RefreshDetails();
         }
