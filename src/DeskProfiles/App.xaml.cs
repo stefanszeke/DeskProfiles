@@ -6,7 +6,7 @@ public partial class App : System.Windows.Application
     protected override void OnStartup(StartupEventArgs e)
     {
         DispatcherUnhandledException += OnUnhandledException;
-        Diagnostics.Info("Application starting, version 0.1.2");
+        Diagnostics.Info("Application starting, version 0.2.2");
         base.OnStartup(e);
     }
     private void OnUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)

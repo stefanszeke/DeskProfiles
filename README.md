@@ -1,60 +1,73 @@
-# DeskProfiles — Windows 11 WPF prototype (v0.1)
+# DeskProfiles v0.2.4
 
-A **non-destructive first step toward a WorkTop replacement**. Keeps layout profiles associated with the active monitor configuration and optionally restores them after a stable monitor change.
+Updates: compact buttons/panels and **Settings → Monitors** with per-display **Ignore** option for matching saved layouts. Ignoring does NOT disable or change a monitor in Windows. Settings persist at `%LOCALAPPDATA%\DeskProfiles\settings.json`.
 
-## Prerequisites
-- Windows 11; .NET 8 SDK (Windows x64). Install from https://dotnet.microsoft.com/download/dotnet/8.0
-- PowerShell or Windows Terminal
+**Important limitations**
+- This release identifies ignored displays by Windows `Screen.DeviceName` (`\\.\DISPLAY9`, etc.). Windows can renumber devices after reconnecting, especially virtual displays. Recheck the Ignore settings after reconnection.
+- Icon coordinates remain Windows virtual-desktop coordinates. If connecting an ignored screen shifts other screens' origins, icon positions may need a fresh save. It works best when spacedesk is placed to the right of your main displays.
+- Ignoring a screen changes matching behavior; it does not delete or migrate the original saved layout entries. Old layouts are searched for compatible non-ignored geometry and new saves use the filtered key. Original settings backups are created automatically by Store.Write as `settings.json.bak`; make a separate copy before upgrading.
+- If an old 3-monitor layout matches the same filtered setup as a 2-monitor layout, the exact 2-monitor key takes precedence.
 
-## Run from source
+Start with `dotnet run` from `src/DeskProfiles`. Test with auto-restore OFF first. Make a backup of `%LOCALAPPDATA%\DeskProfiles\settings.json` before testing.
+
+# DeskProfiles v0.2 — Profile UI Preview
+
+C# WPF/.NET 8 Windows 11 desktop icon layout manager. This update changes the interface, keeping the existing icon capture/restore implementation and `%LOCALAPPDATA%\DeskProfiles\settings.json` format.
+
+## Run
+
+From `src/DeskProfiles` on Windows 11 with the .NET 8 SDK:
+
 ```powershell
-cd src\DeskProfiles
+dotnet clean
 dotnet run
 ```
 
-## Build as an EXE
-```powershell
-cd src\DeskProfiles
-dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o ..\..\publish
-```
-Then open `publish\DeskProfiles.exe`.
+## New UI
 
-## First test
-1. **Exit WorkTop** before testing; two icon-management programs may conflict. (Keep WorkTop installed for now.)
-2. Windows desktop right-click → View → uncheck **Auto arrange icons**. You may keep Align icons to grid on, but fine positioning can be snapped.
-3. Set Win+P → **Extend**, position icons, choose `Personal`, click **Save current layout**.
-4. Set Win+P → **Second screen only**, position icons, click **Save current layout**.
-5. Toggle back and manually **Restore saved layout** each time. Test **Undo last restore**.
-6. Only after verifying manual restore, enable the **Auto restore** checkbox. Monitor state must remain stable for ~4 seconds before it runs.
+- Profile list in left sidebar; green dot marks active profile.
+- Clicking a profile only **selects** it for viewing; **Activate profile** changes active profile.
+- Per-profile saved-monitor layout list and current-setup status.
+- Profile creation, rename, and delete (confirmation; cannot remove the last profile).
+- Save/Restore/Undo operate on the **active profile**; disabled while inspecting an inactive profile.
+- Existing automatic monitor restoration and local diagnostics are preserved.
 
-## Safety and behavior
-- Never moves, deletes, renames, or copies Desktop files; never edits the Windows Desktop folder registry path.
-- The app never saves layouts automatically (which could overwrite good positions with scrambled ones).
-- A restore affects icon positions only, not files. It first captures a session-local undo snapshot.
-- If it finds no saved layout for that exact monitor configuration/profile, it does nothing.
-- Settings stored in `%LOCALAPPDATA%\DeskProfiles\settings.json` (with a `.bak` of the previous version after each change).
-- Profiles in this version are **layout profiles**, not separate desktop *file* sets. Separate file isolation will be a subsequent, higher-risk milestone after this works reliably.
-- Recycle Bin visibility is left alone. Save/restore only enumerates items visible to the Windows desktop view.
-- Icons may not be restorable after renaming or removing them, or if Windows changes their shell PIDLs. This version matches identifiers from PIDLs, not display names, so renamed items are not guaranteed to match.
-- The display identity uses `Screen.AllScreens` device name, coordinates, resolution, and primary flag. Windows may assign different display names after driver changes; those would be considered a different configuration. A later version should use `QueryDisplayConfig` plus stable monitor device paths/EDID identifiers.
-- Restore operations are only attempted on the UI STA thread. No Explorer restart.
-- If desktop auto-arrange is enabled, Windows may immediately override restored positions.
+## Safety
 
-## Important: untested on this host
-The source is packaged for Windows but **has not been compiled or run here**, as this environment lacks the .NET SDK and Windows shell. This is a prototype; interop behavior must be confirmed on your PC before depending on it. If there is a COM exception, report the full exception text and avoid enabling automatic restore.
+- No swapping or moving desktop files. No desktop icon hiding or wallpaper changes yet.
+- Profile deletion removes that profile's saved layouts from the app settings, **not Windows desktop files**.
+- Back up `%LOCALAPPDATA%\DeskProfiles\settings.json` before upgrading. Store uses a `.bak` file on each successful write.
+- Untested on Windows in this environment; retain your Git v0.1.3 commit as rollback.
+- If something fails, see `%LOCALAPPDATA%\DeskProfiles\logs`.
 
-## Planned milestones
-- v0.2: Test/fix Shell COM interop, add robust display identity (`QueryDisplayConfig`), diagnostics, multi-snapshot history, tray icon and hotkeys.
-- v0.3: Add **separate desktop files** per profile using an explicitly confirmed, reversible and backed-up transition. Do not swap Desktop registry paths blindly or touch OneDrive-controlled desktop paths without special handling.
-- v0.4: Full tray UI, startup integration, crash recovery, profile-specific shortcuts and safeguards.
+## Testing
 
-## Windows Shell API reference
-Raymond Chen's Microsoft example: https://devblogs.microsoft.com/oldnewthing/20130318-00/?p=4933
+1. Save/Restore/Undo in an existing profile with auto-restore off.
+2. Select another profile: nothing should change on your desktop.
+3. Activate it explicitly; test its separate layouts.
+4. Confirm your existing layouts still appear and all three monitor configurations work.
 
-## v0.1.2 changes
-- Fixes the incorrect `FindWindowSW` COM dispatch ID that caused `TargetParameterCountException` during Save.
-- Improves visibility of checkbox and monitor information in the dark UI.
-- Adds a persistent diagnostic log at `%LOCALAPPDATA%\DeskProfiles\logs\deskprofiles-YYYY-MM-DD.log`.
-- Shows short errors on screen, with full stack traces in the log.
+## Next
 
-This Windows-only application has not been compiled or runtime-tested in this Linux environment. **Keep auto-restore unchecked until manual Save and Restore have been verified.**
+Real per-profile icon visibility, then wallpapers; neither implemented in v0.2.
+
+## v0.2.2 profile switching fix
+
+Selecting a profile in the sidebar only displays its details. Press **Activate profile** to switch to it. Activation now restores its saved icon positions for the current monitor topology automatically, if a saved layout exists. It does not automatically save the previous profile, preventing unwanted overwrites. If no layout exists for that profile and monitor configuration, activation leaves the icons untouched; arrange them and press Save current layout. Use Undo restore to reverse the last applied positions. Automatic restoration on monitor change remains independently configurable.
+
+## v0.2.2 UI organization
+
+- Profiles: saved icon layouts and profile actions, unchanged from v0.2.1.
+- Settings: global automatic monitor restore setting and links to the local data/logs folders.
+- Activity & Logs: session activity, current log, and logs directory.
+- Startup, tray, wallpapers, and per-profile icon visibility are **not implemented**.
+- Select a profile to go to the Profiles page; activating still applies its saved layout.
+
+## v0.2.4 monitor topology fix
+
+- Keys are now based on sorted screen coordinates, resolution and the **primary flag**. Transient Windows `DISPLAY1`/`DISPLAY2` numbering no longer changes the key.
+- The current monitor section explicitly marks `(PRIMARY)` in Extended mode.
+- Saved monitor layouts have readable summaries rather than internal keys.
+- Existing legacy keys are migrated automatically on startup. The complete original settings file is backed up first in `%LOCALAPPDATA%\DeskProfiles\migration-backups\<timestamp>`. When two layouts collide, the most recently saved one is used, and the original is preserved in the backup.
+- Different screen positions, resolution, or primary-display settings deliberately remain different layouts.
+- Migration has not been run on a real Windows machine in this environment. Test all three monitor modes with automatic restore disabled first.
