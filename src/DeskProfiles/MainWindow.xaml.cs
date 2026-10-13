@@ -1017,6 +1017,11 @@ public partial class MainWindow : Window
             }
             settings.UseWholeDesktopFolders = enable;
             Persist();
+            // Resuming the last active profile redirects the desktop without calling
+            // ActivateProfileAsync. Explorer creates its icons in default positions;
+            // restore the saved layout once the new folder's icons are available.
+            if (enable && resumingSavedWholeDesktop)
+                _ = RestoreLayoutAfterStartupRedirectAsync();
         }
         catch (Exception ex)
         {
@@ -1024,6 +1029,84 @@ public partial class MainWindow : Window
             settings.UseWholeDesktopFolders = false;
             WholeDesktopBox.IsChecked = false;
             Error(ex);
+        }
+    }
+
+    async System.Threading.Tasks.Task RestoreLayoutAfterStartupRedirectAsync()
+    {
+        if (reallyExit || switchingProfile || !settings.UseWholeDesktopFolders) return;
+        var profile = Active;
+        var layout = FindLayout(profile);
+        if (layout == null)
+        {
+            Log($"[STARTUP] No saved layout for '{profile.Name}' on this monitor setup.");
+            return;
+        }
+
+        switchingProfile = true;
+        int generation = ++monitorTransitionGeneration;
+        string topology = currentTopology;
+        bool StillCurrent() => !reallyExit && settings.UseWholeDesktopFolders &&
+            generation == monitorTransitionGeneration && topology == currentTopology &&
+            Key() == topology && settings.ActiveProfile == profile.Name;
+        try
+        {
+            // The known-folder redirect/notification is synchronous, but the desktop
+            // view updates asynchronously. Wait for expected Shell items, not a fixed
+            // number of seconds, and never overwrite the persisted saved layout.
+            var hidden = SystemProfile(profile) ? Array.Empty<string>() :
+                settings.ManagedShortcuts
+                    .Where(i => i.IsManaged && !i.Shared && !profile.ShortcutIds.Contains(i.Id))
+                    .Select(i => i.DesktopFileName)
+                    .Where(n => !string.IsNullOrWhiteSpace(n)).ToArray();
+            var desired = layout.Icons
+                .Where(i => !hidden.Any(n => DesktopIcons.KeyMatchesFilename(i.Pidl, n)))
+                .ToList();
+            Log($"[STARTUP] Waiting for Explorer to display '{profile.Name}' ({desired.Count} expected layout icons).");
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+            int availableCount = 0;
+            while (StillCurrent())
+            {
+                var available = DesktopIcons.Capture().Select(p => p.Pidl)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                availableCount = desired.Count(p => available.Contains(p.Pidl));
+                if (availableCount == desired.Count) break;
+                if (DateTime.UtcNow >= deadline) break;
+                await System.Threading.Tasks.Task.Delay(120);
+            }
+            if (!StillCurrent())
+            {
+                Log("[STARTUP] Layout restore cancelled because profile or displays changed.");
+                return;
+            }
+            if (availableCount != desired.Count)
+                Log($"[STARTUP] Explorer timeout: {availableCount}/{desired.Count} expected icons appeared; restoring available icons.");
+            for (int attempt = 1; attempt <= 3 && StillCurrent(); attempt++)
+            {
+                var current = DesktopIcons.Capture().ToDictionary(p => p.Pidl, StringComparer.OrdinalIgnoreCase);
+                var moved = desired.Where(p => current.TryGetValue(p.Pidl, out var actual) &&
+                    (Math.Abs(p.X - actual.X) > 2 || Math.Abs(p.Y - actual.Y) > 2)).ToList();
+                if (moved.Count == 0) break;
+                int applied = DesktopIcons.Restore(moved);
+                Log($"[STARTUP] Restore pass {attempt}: positioned {applied}/{moved.Count} icons.");
+                await System.Threading.Tasks.Task.Delay(250);
+            }
+            if (!StillCurrent()) return;
+            var final = DesktopIcons.Capture().ToDictionary(p => p.Pidl, StringComparer.OrdinalIgnoreCase);
+            int correct = desired.Count(p => final.TryGetValue(p.Pidl, out var actual) &&
+                Math.Abs(p.X - actual.X) <= 2 && Math.Abs(p.Y - actual.Y) <= 2);
+            int missing = desired.Count(p => !final.ContainsKey(p.Pidl));
+            Log($"[STARTUP] Layout verified for '{profile.Name}': {correct}/{desired.Count} correct; {missing} missing.");
+        }
+        catch (Exception ex)
+        {
+            Diagnostics.Error("Startup desktop layout restoration", ex);
+            Log("[STARTUP] Could not restore saved layout: " + ex.Message);
+        }
+        finally
+        {
+            switchingProfile = false;
+            if (!reallyExit) RefreshDetails();
         }
     }
 
