@@ -175,7 +175,18 @@ internal static class WholeDesktopFolders
             if (!expected.Add(name)) throw new IOException("Duplicate desktop filename: " + name);
             var path = Path.Combine(target, name);
             if (File.Exists(path) && !File.ReadAllBytes(path).SequenceEqual(File.ReadAllBytes(item.ArchivedOriginal)))
-                throw new IOException("Edited shortcut in experimental folder: " + path + ". Refusing to overwrite it.");
+            {
+                // Earlier experiments or a user may have modified this profile-local copy.
+                // Preserve the exact file before replacing it with our archived managed copy.
+                // Never follow a reparse-point file or overwrite an existing backup.
+                if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+                    throw new IOException("Managed shortcut is a filesystem link; refusing to replace it: " + path);
+                var conflictFolder = Path.Combine(Root, "shortcut-conflicts", DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fffffff"));
+                Directory.CreateDirectory(conflictFolder);
+                var backup = Path.Combine(conflictFolder, Guid.NewGuid().ToString("N") + "-" + name);
+                File.Move(path, backup); // Atomic within the same AppData volume; no overwrites.
+                Diagnostics.Info("[WHOLE DESKTOP] Preserved edited shortcut '" + path + "' at '" + backup + "' before restoring the archived managed shortcut.");
+            }
             if (!File.Exists(path)) File.Copy(item.ArchivedOriginal, path, false);
         }
         // Retired feature: remove ONLY previously enrolled, verified junction links.

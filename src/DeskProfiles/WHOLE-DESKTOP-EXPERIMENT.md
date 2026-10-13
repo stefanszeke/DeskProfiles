@@ -35,3 +35,7 @@ This package does not contain generated `bin` or `obj` content. It was staticall
 In Shortcut Visibility, use **Add a folder from original Desktop...** to enroll one real, first-level directory (such as `desktop`). It is marked shared by default, and profile checkboxes allow restricting its visibility. On the next switch into a whole-Desktop profile, DeskProfiles creates a directory junction pointing to the *original* folder. Your files remain in the original location; no contents are copied or moved.
 
 Safety rules: only first-level non-reparse directories are eligible; an existing destination entry is never overwritten; only a validated matching junction can be removed when no longer assigned. Do not recursively delete a junction through third-party tools. Disable the whole-Desktop experiment and restore the original Desktop before uninstalling, migrating settings, or cleaning the private experimental folder. Back up important data before experimenting; this is not yet tested on Windows in this environment.
+
+### Managed shortcut conflicts
+
+If a managed shortcut copy in a private profile folder differs from the archived original, DeskProfiles preserves that modified copy in `%LOCALAPPDATA%\DeskProfiles\whole-desktop-experiment\shortcut-conflicts\<timestamp>\` before restoring the archived managed shortcut. It logs the exact preserved file path. This affects only experimental copies, never the original Desktop folder or the archived original. Inspect retained copies if you deliberately edited a shortcut inside a switched desktop.
