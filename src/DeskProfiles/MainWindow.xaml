@@ -39,7 +39,7 @@
         </StackPanel>
         <StackPanel DockPanel.Dock="Bottom">
           <Button Content="+ New profile" Click="AddProfile_Click" Margin="0,0,0,12"/>
-          <Button Content="▦  Shortcut Visibility" Click="ShortcutsPage_Click" Margin="0,0,0,7"/>
+          <Button Content="▦  Desktop Items" Click="ShortcutsPage_Click" Margin="0,0,0,7"/>
           <Button Content="⚙  Settings" Click="SettingsPage_Click" Margin="0,0,0,7"/>
           <Button Content="≡  Activity &amp; Logs" Click="ActivityPage_Click" Margin="0,0,0,12"/>
           <Separator Background="#465469" Margin="0,0,0,12"/>
@@ -75,7 +75,7 @@
               <TextBlock x:Name="ProfileStateText" Foreground="{StaticResource Muted}" Margin="0,0,0,9"/>
               <WrapPanel>
                 <Button x:Name="ActivateButton" Content="Activate profile" Click="Activate_Click" Style="{StaticResource PrimaryButton}"/>
-                <Button Content="Rename" Click="Rename_Click"/>
+                <Button x:Name="RenameButton" Content="Rename" Click="Rename_Click"/>
                 <Button x:Name="DeleteButton" Content="Delete" Click="Delete_Click"/>
               </WrapPanel>
             </StackPanel>
@@ -161,10 +161,15 @@
 
       <ScrollViewer x:Name="ShortcutsPage" Grid.Row="1" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
         <StackPanel>
-          <TextBlock Text="Shortcut Visibility" FontSize="23" FontWeight="SemiBold" Margin="0,0,0,4"/>
-          <TextBlock Text="Global shortcut assignments across all profiles and monitor setups." Foreground="{StaticResource Muted}" Margin="0,0,0,16"/>
+          <TextBlock Text="Desktop Items · Visibility" FontSize="23" FontWeight="SemiBold" Margin="0,0,0,4"/>
+          <TextBlock Text="Real folders are listed first. Shortcut icons: ↗ app/file, ▣ folder link, ◎ web. Original Desktop always displays its real contents." Foreground="{StaticResource Muted}" Margin="0,0,0,16"/>
           <Border Background="{StaticResource Panel}" Padding="12" CornerRadius="9" Margin="0,0,0,9">
             <StackPanel>
+              <Separator Margin="0,14,0,12"/>
+              <TextBlock Text="Real folders · Original Desktop" FontWeight="SemiBold" FontSize="15" Margin="0,0,0,4"/>
+              <TextBlock Text="These are actual folders, not shortcuts. They appear when you select Original Desktop; other profiles contain their assigned shortcuts." Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,8"/>
+              <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="160" Background="#121A25" Margin="0,0,0,6"><StackPanel x:Name="OriginalFoldersPanel" Margin="4"/></ScrollViewer>
+              <TextBlock x:Name="OriginalFoldersStatus" Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,7"/>
               <TextBlock Text="Desktop shortcut library" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8"/>
               <TextBlock Text="Managed shortcuts follow profile assignments. Unmanaged desktop items stay visible in all profiles." Foreground="{StaticResource Muted}" FontSize="12" Margin="0,0,0,9"/>
               <WrapPanel Margin="0,0,0,8">
@@ -172,16 +177,16 @@
                 <Button Content="Import .lnk / .url" Click="ShortcutImport_Click"/>
                 <Button Content="Shortcut to folder..." Click="ShortcutFolder_Click"/>
               </WrapPanel>
-              <TextBlock Text="Visibility by profile" FontWeight="SemiBold" Margin="0,6,0,6"/>
+              <TextBlock Text="Shortcuts · Select profiles" FontWeight="SemiBold" Margin="0,6,0,6"/>
               <TextBlock Text="Check the profiles where each shortcut should appear. Changes save immediately; activation is not required to edit." Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,7"/>
-              <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" MaxHeight="305" Background="#121A25" Margin="0,0,0,7">
+              <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" MaxHeight="360" Background="#121A25" Margin="0,0,0,7">
                 <StackPanel x:Name="ShortcutMatrix" Margin="4"/>
               </ScrollViewer>
               <WrapPanel Margin="0,0,0,8">
                 <Button Content="Refresh desktop shortcuts" Click="ShortcutInventoryRefresh_Click"/>
                 <Button Content="Restore all managed shortcuts" Click="ShortcutsRestoreAll_Click"/>
               </WrapPanel>
-              <TextBlock Text="Unmanaged = visible in every profile. On the first visibility edit, DeskProfiles asks permission to manage the original desktop shortcut. Real files and folders never move." Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,8"/>
+              <TextBlock Text="Folders: open Original Desktop to access your actual folders. Shortcut entries (↗) are separate .lnk/.url files. Unmanaged = visible in every profile. On the first visibility edit, DeskProfiles asks permission to manage the original desktop shortcut. Real files and folders never move." Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,8"/>
               <StackPanel Visibility="Collapsed">
               <ListBox x:Name="ShortcutList" Height="130" Background="#121A25" BorderBrush="#3B4C62" SelectionChanged="ShortcutList_SelectionChanged" DisplayMemberPath="Description"/>
               <WrapPanel Margin="0,9,0,0">
@@ -193,6 +198,14 @@
               <TextBlock x:Name="ShortcutStatusText" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,8,0,0"/>
               </StackPanel>
               <TextBlock x:Name="ShortcutInventoryStatus" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,6,0,0"/>
+              <Separator Visibility="Collapsed" Margin="0,16,0,13"/>
+              <TextBlock Visibility="Collapsed" Text="Shared desktop folders (whole-Desktop experiment)" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,7"/>
+              <TextBlock Visibility="Collapsed" Text="Enroll real folders from your original Desktop. They remain in place; safe folder junctions are shown in selected profiles. Shared by default. Changes apply on the next profile switch." Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,9"/>
+              <Button Visibility="Collapsed" Content="Add a folder from original Desktop..." Click="FolderInventory_Click" HorizontalAlignment="Left" Margin="0,0,0,9"/>
+              <ScrollViewer Visibility="Collapsed" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" MaxHeight="210" Background="#121A25" Margin="0,0,0,7">
+                <StackPanel x:Name="FolderMatrix" Margin="4"/>
+              </ScrollViewer>
+              <TextBlock Visibility="Collapsed" x:Name="FolderInventoryStatus" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,5,0,0"/>
             </StackPanel>
           </Border>
         </StackPanel>
@@ -206,6 +219,11 @@
               <TextBlock Text="Desktop shortcut management" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,12"/>
               <CheckBox x:Name="ShortcutSwitchingBox" Content="Enable shortcut visibility switching (diagnostic toggle)" Checked="ShortcutSwitching_Changed" Unchecked="ShortcutSwitching_Changed"/>
               <TextBlock Text="Turn this OFF to test layouts and wallpapers without adding/removing shortcut files. Assignments and catalog are preserved. Turning it on does not immediately reconcile; switching profiles applies it." TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,6,0,12"/>
+              <CheckBox x:Name="FolderStagingBox" Content="Experimental: stage hidden shortcuts in a private folder" Checked="FolderStaging_Changed" Unchecked="FolderStaging_Changed"/>
+              <TextBlock Text="Reversibly moves managed .lnk/.url files to a private holding folder instead of deleting/re-copying them. Existing backups are kept. Explorer still needs to update its icon view; this is a test, not a guaranteed speed improvement. Takes effect on the next profile switch." TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,6,0,12"/>
+              <CheckBox x:Name="WholeDesktopBox" Content="EXPERIMENT: switch Windows Desktop folder as a unit (system-wide)" Checked="WholeDesktop_Changed" Unchecked="WholeDesktop_Changed"/>
+              <Button Content="Restore original Windows Desktop now" Click="RestoreOriginalDesktop_Click" Margin="0,8,0,4" HorizontalAlignment="Left"/>
+              <TextBlock Text="WARNING: While enabled, ordinary files from your original Desktop will NOT be visible (they remain untouched). Only enrolled shortcuts appear in private profile folders. Original Desktop is a protected profile containing your real files and folders. Other programs see a different Desktop path. Disable this test or exit DeskProfiles to restore. Do not use with OneDrive Desktop backup." TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,4,0,12"/>
               <CheckBox x:Name="AutoManageShortcutBox" Content="Automatically assign new desktop shortcuts to active profile" Checked="AutoManageShortcuts_Changed" Unchecked="AutoManageShortcuts_Changed"/>
               <TextBlock Text="Only NEW .lnk/.url shortcuts on your personal Desktop, after DeskProfiles starts. Existing shortcuts require explicit Manage. Original shortcut backups are retained; targets never move." TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,10,0,0"/>
             </StackPanel>
@@ -270,7 +288,7 @@
         </StackPanel>
         <TextBox x:Name="LogText" Grid.Row="2" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#0D131C" Foreground="#CED9E8" BorderBrush="#344155" Padding="11"/>
       </Grid>
-      <TextBlock Grid.Row="2" Text="Safe preview · Turn off Windows ‘Auto arrange icons’ · Existing v0.1.3 layouts remain compatible" Foreground="#C1CDDB" FontSize="12" Margin="0,12,0,0"/>
+      <TextBlock Grid.Row="2" Text="Whole-Desktop mode: restores Original Desktop on exit · Disable Windows Auto arrange · Layouts are saved per monitor setup" Foreground="#C1CDDB" FontSize="12" Margin="0,12,0,0"/>
     </Grid>
   
 

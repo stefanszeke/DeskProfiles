@@ -34,11 +34,18 @@ public static class ManagedDesktop
         catch { item.IsManaged = false; item.DesktopFileName = ""; item.ArchivedOriginal = ""; throw; }
     }
 
+    // Experimental folder-backed visibility: keep each enrolled shortcut in a private
+    // holding folder when hidden. No executable target or ordinary desktop file moves.
+    // The original immutable enrollment backup remains separate for recovery.
+    public static string HoldingFolder => Path.Combine(Store.DirectoryPath, "profile-shortcut-holding");
+    static string HoldingPath(ManagedShortcut item) => Path.Combine(HoldingFolder, item.Id + Path.GetExtension(item.DesktopFileName));
+
     public static List<string> Reconcile(Settings settings, Profile active)
     {
         var messages = new List<string>();
         var items = settings.ManagedShortcuts.Where(i => i.IsManaged).ToList();
-        // First hide items not belonging to the active profile, then create desired copies.
+        if (settings.UseFolderStaging) Directory.CreateDirectory(HoldingFolder);
+        // Hide before showing to reduce temporary collisions in Explorer's view.
         foreach (var item in items.OrderBy(i => (i.Shared || active.ShortcutIds.Contains(i.Id)) ? 1 : 0))
         {
             try
@@ -48,20 +55,54 @@ public static class ManagedDesktop
                 if (string.IsNullOrWhiteSpace(item.DesktopFileName) || !IsShortcut(path) || !File.Exists(archive))
                 { messages.Add($"Skipped {item.Name}: managed shortcut has no valid original archive."); continue; }
                 bool visible = item.Shared || active.ShortcutIds.Contains(item.Id);
+                if (!settings.UseFolderStaging)
+                {
+                    // Original tested implementation, retained as an immediate rollback.
+                    if (!visible)
+                    {
+                        if (!File.Exists(path)) continue;
+                        if (!SameBytes(path, archive)) { messages.Add($"NOT hidden: {item.DesktopFileName} differs from its backup; manual review required."); continue; }
+                        File.Delete(path);
+                        messages.Add($"Hidden {item.DesktopFileName}");
+                    }
+                    else if (!File.Exists(path))
+                    {
+                        File.Copy(archive, path, false);
+                        messages.Add($"Shown {item.DesktopFileName}");
+                    }
+                    else if (!SameBytes(path, archive))
+                        messages.Add($"Collision: {item.DesktopFileName} already exists and differs; left unchanged.");
+                    continue;
+                }
+
+                string holding = HoldingPath(item);
                 if (!visible)
                 {
                     if (!File.Exists(path)) continue;
-                    if (!SameBytes(path, archive)) { messages.Add($"NOT hidden: {item.DesktopFileName} differs from its backup; manual review required."); continue; }
-                    File.Delete(path); // Only the explicitly enrolled shortcut whose contents still match its backup.
-                    messages.Add($"Hidden {item.DesktopFileName}");
+                    if (!SameBytes(path, archive)) { messages.Add($"NOT staged: {item.DesktopFileName} differs from backup; manual review required."); continue; }
+                    if (File.Exists(holding))
+                    {
+                        if (!SameBytes(holding, archive)) { messages.Add($"Holding collision for {item.DesktopFileName}; left unchanged."); continue; }
+                        // Crash/restart recovery: both copies are identical, so retain the staged copy.
+                        File.Delete(path);
+                    }
+                    else File.Move(path, holding);
+                    messages.Add($"Staged {item.DesktopFileName}");
                 }
                 else if (!File.Exists(path))
                 {
-                    File.Copy(archive, path, false);
+                    if (File.Exists(holding))
+                    {
+                        if (!SameBytes(holding, archive)) { messages.Add($"Holding copy for {item.DesktopFileName} differs from backup; not restored."); continue; }
+                        File.Move(holding, path);
+                    }
+                    else File.Copy(archive, path, false); // First activation / migration.
                     messages.Add($"Shown {item.DesktopFileName}");
                 }
                 else if (!SameBytes(path, archive))
                     messages.Add($"Collision: {item.DesktopFileName} already exists and differs; left unchanged.");
+                else if (File.Exists(holding) && SameBytes(holding, archive))
+                    File.Delete(holding); // Clean a duplicate after interrupted recovery.
             }
             catch (Exception ex) { messages.Add($"Could not update {item.Name}: {ex.Message}"); }
         }
@@ -76,7 +117,18 @@ public static class ManagedDesktop
         string path = Path.Combine(UserDesktop, item.DesktopFileName);
         if (File.Exists(path) && !SameBytes(path, item.ArchivedOriginal))
             throw new IOException("The existing Desktop file differs from its backup; cannot safely release ownership.");
-        if (!File.Exists(path)) File.Copy(item.ArchivedOriginal, path, false);
+        string holding = HoldingPath(item);
+        if (!File.Exists(path))
+        {
+            if (File.Exists(holding) && SameBytes(holding, item.ArchivedOriginal)) File.Move(holding, path);
+            else File.Copy(item.ArchivedOriginal, path, false);
+        }
+        if (File.Exists(holding))
+        {
+            if (!SameBytes(holding, item.ArchivedOriginal))
+                throw new IOException("Staged shortcut differs from its backup; manual recovery required.");
+            File.Delete(holding);
+        }
         item.IsManaged = false;
         Store.Write(settings);
     }

@@ -1,0 +1,23 @@
+DeskProfiles - Folder staging experiment
+========================================
+Base: last working fast-switch v1 experiment (not the problematic fast-switch v2).
+
+Enabled via Settings > Desktop shortcut management > Experimental: stage hidden shortcuts in a private folder.
+OFF by default (original behavior). Toggle does not move anything until the next profile switch.
+
+ON: only explicitly managed personal-desktop .lnk/.url files move between the
+personal Desktop and %LOCALAPPDATA%\DeskProfiles\profile-shortcut-holding.
+This is a per-shortcut holding-folder experiment, NOT a Windows desktop folder
+redirection/replace, which requires separate OS-level compatibility analysis.
+All immutable original backups remain in shortcut-originals.
+Any name conflict or unexpected byte mismatch is left unchanged and logged.
+Releasing a managed shortcut restores from holding (or original archive).
+The existing Explorer readiness and icon restoration logic remains unchanged,
+so this may be no faster. Compare `[BASELINE] Shortcut reconciliation` plus
+`[SWITCH] Explorer readiness` and total time with toggle OFF vs ON.
+
+IMPORTANT: For the first test, back up %LOCALAPPDATA%\DeskProfiles and your
+Desktop, test ordinary switching only (not monitor transitions), and verify
+shortcuts are present in each profile. Disable the setting and switch profiles
+to return to legacy behavior. Don't manually delete the holding folder while
+shortcuts are staged. Do not use this mode as a performance claim yet.
