@@ -71,3 +71,15 @@ Selecting a profile in the sidebar only displays its details. Press **Activate p
 - Existing legacy keys are migrated automatically on startup. The complete original settings file is backed up first in `%LOCALAPPDATA%\DeskProfiles\migration-backups\<timestamp>`. When two layouts collide, the most recently saved one is used, and the original is preserved in the backup.
 - Different screen positions, resolution, or primary-display settings deliberately remain different layouts.
 - Migration has not been run on a real Windows machine in this environment. Test all three monitor modes with automatic restore disabled first.
+
+
+## v0.2.5 — profile wallpapers
+Select a profile and choose Wallpaper → Browse, then select a style. Wallpaper preferences are stored per profile, not per monitor layout. The Windows wallpaper changes when the profile is activated or when you press Apply now on the active profile. Disabling or clearing the option does not reset Windows' wallpaper. Image files are referenced by path and are not copied; keep them in a permanent location.
+
+The initial wallpaper backend uses the Windows user wallpaper setting; it applies one image/style globally, rather than separate images for individual monitors. Errors are logged in the existing logs directory.
+
+
+## v0.2.5.1 fixes
+- Fix `List<string>.Length` compilation error in monitor layout descriptions (`.Count`).
+- Make wallpaper style dropdown text readable by using dark text on a light popup.
+- Wallpaper disabled continues to leave Windows wallpaper unchanged.

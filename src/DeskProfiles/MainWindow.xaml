@@ -1,7 +1,7 @@
 <Window x:Class="DeskProfiles.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="DeskProfiles v0.2.4" Width="940" Height="650" MinWidth="790" MinHeight="540"
+        Title="DeskProfiles v0.2.5.1" Width="940" Height="650" MinWidth="790" MinHeight="540"
         Background="#121821" Foreground="#EDF2F9" FontFamily="Segoe UI"
         WindowStartupLocation="CenterScreen">
   <Window.Resources>
@@ -35,7 +35,7 @@
       <DockPanel Margin="12,16,10,12">
         <StackPanel DockPanel.Dock="Top" Margin="0,0,0,25">
           <TextBlock Text="DeskProfiles" FontSize="23" FontWeight="SemiBold"/>
-          <TextBlock Text="Desktop layout manager · v0.2.4" Margin="0,5,0,0" Foreground="{StaticResource Muted}" FontSize="12"/>
+          <TextBlock Text="Desktop layout manager · v0.2.5.1" Margin="0,5,0,0" Foreground="{StaticResource Muted}" FontSize="12"/>
         </StackPanel>
         <StackPanel DockPanel.Dock="Bottom">
           <Button Content="+ New profile" Click="AddProfile_Click" Margin="0,0,0,12"/>
@@ -110,8 +110,34 @@
           </Border>
           <Border Background="{StaticResource Panel}" Padding="12" CornerRadius="9" Margin="0,0,0,9">
             <StackPanel>
+              <TextBlock Text="Wallpaper" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8"/>
+              <CheckBox x:Name="UseWallpaperBox" Content="Use a custom wallpaper for this profile" Checked="WallpaperEnabled_Changed" Unchecked="WallpaperEnabled_Changed" Margin="0,0,0,9"/>
+              <TextBlock Text="Selected image" FontSize="12" Foreground="{StaticResource Muted}" Margin="0,0,0,4"/>
+              <DockPanel Margin="0,0,0,8">
+                <Button DockPanel.Dock="Right" Content="Browse..." Click="WallpaperBrowse_Click" Margin="8,0,0,0"/>
+                <TextBox x:Name="WallpaperPathBox" IsReadOnly="True" VerticalContentAlignment="Center" Background="#131B27" Foreground="#EDF2F9" BorderBrush="#3B4C62" Padding="5,3" MinHeight="27" ToolTip="Image path; the original file must remain accessible"/>
+              </DockPanel>
+              <TextBlock Text="Style" FontSize="12" Foreground="{StaticResource Muted}" Margin="0,0,0,4"/>
+              <ComboBox x:Name="WallpaperStyleBox" SelectionChanged="WallpaperStyle_Changed" Width="155" HorizontalAlignment="Left" Background="#FFFFFF" Foreground="#172536" Margin="0,0,0,10">
+                <ComboBox.ItemContainerStyle>
+                  <Style TargetType="ComboBoxItem">
+                    <Setter Property="Foreground" Value="#172536"/>
+                    <Setter Property="Background" Value="#FFFFFF"/>
+                  </Style>
+                </ComboBox.ItemContainerStyle>
+                <ComboBoxItem Content="Fill"/><ComboBoxItem Content="Fit"/><ComboBoxItem Content="Stretch"/><ComboBoxItem Content="Center"/><ComboBoxItem Content="Tile"/><ComboBoxItem Content="Span"/>
+              </ComboBox>
+              <WrapPanel>
+                <Button Content="Apply now" Click="WallpaperApply_Click" Style="{StaticResource PrimaryButton}"/>
+                <Button Content="Clear image" Click="WallpaperClear_Click"/>
+              </WrapPanel>
+              <TextBlock Text="Activating a profile applies its wallpaper across the Windows desktop, regardless of monitor setup. Disabling this option leaves the current wallpaper unchanged." FontSize="12" Foreground="{StaticResource Muted}" Margin="0,9,0,0"/>
+            </StackPanel>
+          </Border>
+          <Border Background="{StaticResource Panel}" Padding="12" CornerRadius="9" Margin="0,0,0,9">
+            <StackPanel>
               <TextBlock Text="Coming next" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8"/>
-              <TextBlock Text="Per-profile icon visibility and wallpapers are planned, not active yet." Foreground="{StaticResource Muted}"/>
+              <TextBlock Text="Per-profile icon visibility is planned, not active yet." Foreground="{StaticResource Muted}"/>
             </StackPanel>
           </Border>
         </StackPanel>
@@ -156,7 +182,7 @@
           <Border Background="{StaticResource Panel}" Padding="12" CornerRadius="9" Margin="0,0,0,9">
             <StackPanel>
               <TextBlock Text="Startup &amp; tray" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,10"/>
-              <TextBlock Text="Run with Windows and minimize to tray are planned for a future version. No startup changes are made by v0.2.4." Foreground="{StaticResource Muted}"/>
+              <TextBlock Text="Run with Windows and minimize to tray are planned for a future version. No startup changes are made by v0.2.5.1." Foreground="{StaticResource Muted}"/>
             </StackPanel>
           </Border>
           <Border Background="{StaticResource Panel}" Padding="12" CornerRadius="9" Margin="0,0,0,9">

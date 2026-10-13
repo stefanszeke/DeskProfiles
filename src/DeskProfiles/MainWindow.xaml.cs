@@ -27,6 +27,7 @@ public partial class MainWindow : Window
     sealed record LayoutRow(string Title, string Detail);
     public sealed record MonitorRow(string DeviceName, string Description, bool IsIgnored);
     bool updatingMonitors;
+    bool updatingWallpaper;
     string Key() => MonitorIdentity.Key(settings.IgnoredMonitors);
     Layout? FindLayout(Profile profile)
     {
@@ -172,10 +173,98 @@ public partial class MainWindow : Window
         LayoutStatusText.Text = FindLayout(profile) is { } layout
             ? $"Saved for this setup · {layout.Icons.Count} icons · {layout.SavedUtc.ToLocalTime():g}"
             : "No saved layout for this monitor configuration.";
+        RefreshWallpaper();
         SavedLayoutsList.ItemsSource = profile.Layouts.Values.OrderByDescending(l => l.SavedUtc)
             .Select(l => new LayoutRow(MonitorIdentity.MatchKey(l.MonitorKey, settings.IgnoredMonitors) == currentTopology ? "● Current monitor setup" : "Saved monitor setup",
                 $"{MonitorIdentity.DescribeKey(l.MonitorKey)}  ·  {l.Icons.Count} icons  ·  {l.SavedUtc.ToLocalTime():g}"))
             .ToList();
+    }
+
+    void RefreshWallpaper()
+    {
+        updatingWallpaper = true;
+        try
+        {
+            var profile = Selected;
+            UseWallpaperBox.IsChecked = profile.UseCustomWallpaper;
+            WallpaperPathBox.Text = profile.WallpaperPath;
+            var desired = profile.WallpaperStyle;
+            WallpaperStyleBox.SelectedItem = WallpaperStyleBox.Items.Cast<ComboBoxItem>()
+                .FirstOrDefault(i => string.Equals(i.Content?.ToString(), desired, StringComparison.OrdinalIgnoreCase))
+                ?? WallpaperStyleBox.Items[0];
+        }
+        finally { updatingWallpaper = false; }
+    }
+    void WallpaperEnabled_Changed(object sender, RoutedEventArgs e)
+    {
+        if (loading || updatingWallpaper) return;
+        var profile = Selected;
+        var previous = profile.UseCustomWallpaper;
+        try
+        {
+            profile.UseCustomWallpaper = UseWallpaperBox.IsChecked == true;
+            Persist();
+            Log($"Wallpaper {(profile.UseCustomWallpaper ? "enabled" : "disabled")} for '{profile.Name}'. Apply on activation or with Apply now.");
+        }
+        catch (Exception ex) { profile.UseCustomWallpaper = previous; RefreshWallpaper(); Error(ex); }
+    }
+    void WallpaperBrowse_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "Choose profile wallpaper",
+            Filter = "Images (*.jpg;*.jpeg;*.png;*.bmp)|*.jpg;*.jpeg;*.png;*.bmp|All files (*.*)|*.*",
+            CheckFileExists = true
+        };
+        if (dialog.ShowDialog(this) != true) return;
+        var profile = Selected;
+        var oldPath = profile.WallpaperPath;
+        var oldEnabled = profile.UseCustomWallpaper;
+        try
+        {
+            profile.WallpaperPath = dialog.FileName;
+            profile.UseCustomWallpaper = true;
+            Persist(); RefreshWallpaper();
+            Log($"Selected wallpaper for '{profile.Name}'. It will be applied on activation or with Apply now.");
+        }
+        catch (Exception ex) { profile.WallpaperPath = oldPath; profile.UseCustomWallpaper = oldEnabled; RefreshWallpaper(); Error(ex); }
+    }
+    void WallpaperStyle_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (loading || updatingWallpaper || WallpaperStyleBox.SelectedItem is not ComboBoxItem item) return;
+        var profile = Selected;
+        var old = profile.WallpaperStyle;
+        try { profile.WallpaperStyle = item.Content?.ToString() ?? "Fill"; Persist(); }
+        catch (Exception ex) { profile.WallpaperStyle = old; RefreshWallpaper(); Error(ex); }
+    }
+    void WallpaperApply_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (!Selected.UseCustomWallpaper) { Log("Wallpaper disabled for this profile. Windows wallpaper unchanged."); return; }
+            if (!ReferenceEquals(Selected, Active))
+            {
+                Log("Activate this profile before applying its wallpaper.");
+                return;
+            }
+            WallpaperService.Apply(Active);
+            Log($"Applied wallpaper for '{Active.Name}'.");
+        }
+        catch (Exception ex) { Error(ex); }
+    }
+    void WallpaperClear_Click(object sender, RoutedEventArgs e)
+    {
+        var profile = Selected;
+        var oldPath = profile.WallpaperPath;
+        var oldEnabled = profile.UseCustomWallpaper;
+        try
+        {
+            profile.WallpaperPath = "";
+            profile.UseCustomWallpaper = false;
+            Persist(); RefreshWallpaper();
+            Log($"Cleared wallpaper preference for '{profile.Name}'. Windows wallpaper unchanged.");
+        }
+        catch (Exception ex) { profile.WallpaperPath = oldPath; profile.UseCustomWallpaper = oldEnabled; RefreshWallpaper(); Error(ex); }
     }
 
     void Log(string message)
@@ -230,6 +319,19 @@ public partial class MainWindow : Window
                 throw;
             }
             ReloadProfiles(profile);
+            try
+            {
+                if (profile.UseCustomWallpaper)
+                {
+                    WallpaperService.Apply(profile);
+                    Log($"Applied wallpaper for '{profile.Name}'.");
+                }
+            }
+            catch (Exception wallpaperError)
+            {
+                Diagnostics.Error("Wallpaper apply failed after profile activation", wallpaperError);
+                Log($"Warning: profile activated but wallpaper was not applied: {wallpaperError.Message}");
+            }
             Log(before is null
                 ? $"Activated '{profile.Name}'; no saved layout for this monitor setup. Icon positions unchanged. Arrange and Save when ready."
                 : $"Activated '{profile.Name}' and restored {applied} icon positions. Undo is available.");
