@@ -5,6 +5,9 @@ using System.Windows.Controls;
 using System.Windows.Threading;
 using System.Windows.Input;
 using WpfKey = System.Windows.Input.Key;
+using WpfOrientation = System.Windows.Controls.Orientation;
+using WpfHorizontalAlignment = System.Windows.HorizontalAlignment;
+using Button = System.Windows.Controls.Button;
 using System.Windows.Interop;
 using System.Runtime.InteropServices;
 using Forms = System.Windows.Forms;
@@ -18,6 +21,14 @@ public partial class MainWindow : Window
     Forms.NotifyIcon? tray;
     bool reallyExit;
     bool recordingHotkey;
+    bool switchingProfile;
+    FileSystemWatcher? desktopWatcher;
+    readonly HashSet<string> newDesktopShortcuts = new(StringComparer.OrdinalIgnoreCase);
+    readonly DispatcherTimer shortcutWatchTimer = new() { Interval = TimeSpan.FromSeconds(3) };
+    readonly DispatcherTimer shortcutReconcileTimer = new() { Interval = TimeSpan.FromSeconds(5) };
+    readonly HashSet<string> knownDesktopFiles = new(StringComparer.OrdinalIgnoreCase);
+    readonly Dictionary<string, string> discoveredForProfile = new(StringComparer.OrdinalIgnoreCase);
+    bool reconcilingDesktop;
     Profile? recordingProfile;
 
     readonly DispatcherTimer monitorTimer;
@@ -39,6 +50,7 @@ public partial class MainWindow : Window
     public sealed record MonitorRow(string DeviceName, string Description, bool IsIgnored);
     bool updatingMonitors;
     bool updatingWallpaper;
+    sealed record ShortcutRow(ManagedShortcut Item, string Description);
     string Key() => MonitorIdentity.Key(settings.IgnoredMonitors);
     Layout? FindLayout(Profile profile)
     {
@@ -108,6 +120,7 @@ public partial class MainWindow : Window
         pendingSince = DateTime.UtcNow;
         ReloadProfiles(Active);
         AutoRestoreBox.IsChecked = settings.AutoRestore;
+        ShortcutSwitchingBox.IsChecked = settings.EnableShortcutVisibilitySwitching;
         StartWithWindowsBox.IsChecked = StartupRegistration.IsEnabled();
         loading = false;
         RefreshMonitors();
@@ -116,7 +129,10 @@ public partial class MainWindow : Window
         monitorTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         monitorTimer.Tick += MonitorTimer_Tick;
         monitorTimer.Start();
-        Loaded += (_, _) => InitializeTrayAndHotkeys();
+        Loaded += (_, _) => { InitializeTrayAndHotkeys(); try { InventoryDesktop(); RefreshShortcuts(); } catch (Exception ex) { Diagnostics.Error("Desktop inventory", ex); } StartShortcutWatcher(); StartDesktopReconciliation(); };
+        shortcutWatchTimer.Tick += NewShortcutTimer_Tick;
+        shortcutReconcileTimer.Tick += (_, _) => ReconcileDesktopInventory();
+        AutoManageShortcutBox.IsChecked = settings.AutoManageNewShortcuts;
     }
 
     void ShowPage(string page)
@@ -187,12 +203,571 @@ public partial class MainWindow : Window
             ? $"Saved for this setup · {layout.Icons.Count} icons · {layout.SavedUtc.ToLocalTime():g}"
             : "No saved layout for this monitor configuration.";
         RefreshWallpaper();
+        RefreshShortcuts();
         HotkeyText.Text = string.IsNullOrWhiteSpace(profile.Hotkey) ? "None" : profile.Hotkey;
         HotkeyHint.Text = "Available globally while DeskProfiles is running.";
         SavedLayoutsList.ItemsSource = profile.Layouts.Values.OrderByDescending(l => l.SavedUtc)
             .Select(l => new LayoutRow(MonitorIdentity.MatchKey(l.MonitorKey, settings.IgnoredMonitors) == currentTopology ? "● Current monitor setup" : "Saved monitor setup",
                 $"{MonitorIdentity.DescribeKey(l.MonitorKey)}  ·  {l.Icons.Count} icons  ·  {l.SavedUtc.ToLocalTime():g}"))
             .ToList();
+    }
+
+
+    ManagedShortcut? SelectedShortcut => (ShortcutList.SelectedItem as ShortcutRow)?.Item;
+
+    void RefreshShortcuts()
+    {
+        var selectedId = SelectedShortcut?.Id;
+        var profile = Selected;
+        ShortcutList.ItemsSource = null;
+        ShortcutList.ItemsSource = settings.ManagedShortcuts.Select(item =>
+            new ShortcutRow(item, item.Name + (item.IsManaged ? "  [MANAGED]" : "  [Library only]") + (item.Shared ? "  [Shared]" : profile.ShortcutIds.Contains(item.Id) ? "  [This profile]" : "  [Not assigned]"))).ToList();
+        ShortcutList.SelectedItem = ShortcutList.Items.Cast<ShortcutRow>().FirstOrDefault(x => x.Item.Id == selectedId);
+        ShortcutStatusText.Text = $"{settings.ManagedShortcuts.Count} library items; {settings.ManagedShortcuts.Count(x => x.IsManaged)} managed on Desktop. Unmanaged originals remain visible everywhere.";
+        ShortcutSelectionButtons();
+        RenderShortcutMatrix();
+    }
+
+    bool updatingShortcutMatrix;
+
+    // Inventory only copies shortcut files into our private catalog; desktop files are untouched.
+    void InventoryDesktop()
+    {
+        var desktop = ManagedDesktop.UserDesktop;
+        int discovered = 0;
+        foreach (var path in ShortcutLibrary.ScanDesktop())
+        {
+            if (!string.Equals(Path.GetDirectoryName(path), desktop, StringComparison.OrdinalIgnoreCase)) continue;
+            if (settings.ManagedShortcuts.Any(i => i.IsManaged &&
+                string.Equals(i.DesktopFileName, Path.GetFileName(path), StringComparison.OrdinalIgnoreCase))) continue;
+            try
+            {
+                if (ShortcutLibrary.AlreadyImported(settings, path)) continue;
+                ShortcutLibrary.Import(settings, path);
+                discovered++;
+            }
+            catch (Exception ex) { Diagnostics.Error("Inventory shortcut " + path, ex); }
+        }
+        int cleaned = CleanupMissingUnmanagedDesktopShortcuts();
+        if (discovered > 0 || cleaned > 0) Persist();
+        if (discovered > 0) Log($"Found {discovered} existing desktop shortcut(s); left unmanaged.");
+        if (cleaned > 0) Log($"[DISCOVERY] Removed {cleaned} stale unmanaged catalog entry/entries.");
+    }
+
+    // Never delete managed records: their desktop copies can legitimately be absent in another profile.
+    // Also preserve imported shortcuts originating outside the personal desktop.
+    int CleanupMissingUnmanagedDesktopShortcuts()
+    {
+        var missing = settings.ManagedShortcuts.Where(item => !item.IsManaged
+            && !string.IsNullOrWhiteSpace(item.SourcePath)
+            && string.Equals(Path.GetDirectoryName(item.SourcePath), ManagedDesktop.UserDesktop, StringComparison.OrdinalIgnoreCase)
+            && !File.Exists(item.SourcePath)).ToList();
+        foreach (var item in missing)
+        {
+            settings.ManagedShortcuts.Remove(item);
+            foreach (var profile in settings.Profiles) profile.ShortcutIds.Remove(item.Id);
+            Diagnostics.Info($"[DISCOVERY] Missing shortcut removed from catalog: {item.Name}");
+        }
+        return missing.Count;
+    }
+
+    void ShortcutInventoryRefresh_Click(object sender, RoutedEventArgs e)
+    {
+        try { InventoryDesktop(); RefreshShortcuts(); }
+        catch (Exception ex) { Error(ex); }
+    }
+
+    void RenderShortcutMatrix()
+    {
+        if (updatingShortcutMatrix) return;
+        updatingShortcutMatrix = true;
+        try
+        {
+            ShortcutMatrix.Children.Clear();
+            int count = settings.Profiles.Count;
+            // Widths allow horizontal scrolling for lots of profiles.
+            var heading = new StackPanel { Orientation = WpfOrientation.Horizontal, Margin = new Thickness(0, 0, 0, 6) };
+            heading.Children.Add(new TextBlock { Text = "Shortcut / status", Width = 230, FontWeight = FontWeights.SemiBold });
+            foreach (var profile in settings.Profiles)
+                heading.Children.Add(new TextBlock { Text = profile.Name, Width = 96, TextAlignment = TextAlignment.Center, FontWeight = FontWeights.SemiBold,
+                    ToolTip = profile.Name });
+            ShortcutMatrix.Children.Add(heading);
+            foreach (var item in settings.ManagedShortcuts.OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase))
+            {
+                var line = new StackPanel { Orientation = WpfOrientation.Horizontal, Margin = new Thickness(0, 0, 0, 4) };
+                string status = item.IsManaged ? "Managed" : "Unmanaged";
+                var label = new TextBlock { Text = $"{item.Name}  [{status}]", Width = 230, TextTrimming = TextTrimming.CharacterEllipsis,
+                    VerticalAlignment = VerticalAlignment.Center, ToolTip = item.SourcePath };
+                line.Children.Add(label);
+                foreach (var profile in settings.Profiles)
+                {
+                    // Unmanaged files stay on Desktop in all profiles, regardless of saved assignments.
+                    bool enabled = item.Shared || profile.ShortcutIds.Contains(item.Id);
+                    // Indeterminate is intentionally NOT assigned. Unmanaged shortcuts remain visible
+                    // until explicitly enrolled; a checked box would incorrectly suggest sharing.
+                    var box = new System.Windows.Controls.CheckBox { IsThreeState = !item.IsManaged,
+                        IsChecked = item.IsManaged ? enabled : null, Width = 96,
+                        HorizontalContentAlignment = WpfHorizontalAlignment.Center, HorizontalAlignment = WpfHorizontalAlignment.Center,
+                        VerticalAlignment = VerticalAlignment.Center, ToolTip = $"Show {item.Name} in {profile.Name}" };
+                    box.Checked += (_, _) => SetShortcutVisibility(item, profile, true);
+                    box.Unchecked += (_, _) => SetShortcutVisibility(item, profile, false);
+                    line.Children.Add(box);
+                }
+                ShortcutMatrix.Children.Add(line);
+            }
+            ShortcutInventoryStatus.Text = $"{settings.ManagedShortcuts.Count} shortcuts • {settings.ManagedShortcuts.Count(i => i.IsManaged)} managed. — means Unmanaged (always visible until enrolled); checkboxes on managed shortcuts are real profile assignments.";
+        }
+        finally { updatingShortcutMatrix = false; }
+    }
+
+    void SetShortcutVisibility(ManagedShortcut item, Profile profile, bool visible)
+    {
+        if (updatingShortcutMatrix) return;
+        if (!item.IsManaged)
+        {
+            // Imported shortcut from elsewhere can't be enrolled unless its original is on this user's desktop.
+            string source = item.SourcePath;
+            if (!File.Exists(source) || !string.Equals(Path.GetDirectoryName(source), ManagedDesktop.UserDesktop, StringComparison.OrdinalIgnoreCase))
+            {
+                Log($"'{item.Name}' is library-only. To change its desktop visibility, place a shortcut on your personal Desktop and refresh.");
+                RenderShortcutMatrix();
+                return;
+            }
+            if (System.Windows.MessageBox.Show(
+                    $"Manage '{item.Name}'?\n\nDeskProfiles will back up the shortcut and control where it appears. The shortcut target is never moved.\n\nYou can recover managed shortcuts from this page.",
+                    "Manage desktop shortcut", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+            { RenderShortcutMatrix(); return; }
+            try
+            {
+                // Before enrollment, the actual shortcut is visible everywhere.
+                item.Shared = true;
+                ManagedDesktop.Enroll(settings, item, source);
+            }
+            catch (Exception ex) { RenderShortcutMatrix(); Error(ex); return; }
+        }
+        var oldShared = item.Shared;
+        var oldIds = settings.Profiles.ToDictionary(p => p, p => p.ShortcutIds.Contains(item.Id));
+        try
+        {
+            // Turn shared status into explicit per-profile assignments to allow a single edit.
+            if (item.Shared)
+            {
+                item.Shared = false;
+                foreach (var p in settings.Profiles)
+                    if (!p.ShortcutIds.Contains(item.Id)) p.ShortcutIds.Add(item.Id);
+            }
+            if (visible)
+            {
+                if (!profile.ShortcutIds.Contains(item.Id)) profile.ShortcutIds.Add(item.Id);
+            }
+            else profile.ShortcutIds.Remove(item.Id);
+            if (settings.Profiles.All(p => p.ShortcutIds.Contains(item.Id))) item.Shared = true;
+            Persist();
+            UpdateManagedShortcuts();
+            RenderShortcutMatrix();
+            Log($"'{item.Name}' visibility for '{profile.Name}': {(visible ? "On" : "Off")}");
+        }
+        catch (Exception ex)
+        {
+            item.Shared = oldShared;
+            foreach (var kv in oldIds)
+            {
+                kv.Key.ShortcutIds.Remove(item.Id);
+                if (kv.Value) kv.Key.ShortcutIds.Add(item.Id);
+            }
+            RenderShortcutMatrix(); Error(ex);
+        }
+    }
+
+    void ShortcutsRestoreAll_Click(object sender, RoutedEventArgs e)
+    {
+        if (System.Windows.MessageBox.Show("Restore every managed shortcut to the Desktop and stop managing its visibility? Existing unrelated desktop files will not be overwritten.",
+            "Restore managed shortcuts", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+        int restored = 0, failed = 0;
+        foreach (var item in settings.ManagedShortcuts.Where(i => i.IsManaged).ToList())
+        {
+            try { ManagedDesktop.Release(settings, item); restored++; }
+            catch (Exception ex) { failed++; Diagnostics.Error("Restore " + item.Name, ex); Log($"Could not restore '{item.Name}': {ex.Message}"); }
+        }
+        RefreshShortcuts();
+        Log($"Restored {restored} managed shortcuts; {failed} need manual review.");
+    }
+
+    void ShortcutSelectionButtons()
+    {
+        var item = SelectedShortcut;
+        ShortcutAssignButton.IsEnabled = item != null && !item.Shared;
+        ShortcutSharedButton.IsEnabled = item != null;
+        ShortcutManageButton.IsEnabled = item != null && !item.IsManaged && !string.IsNullOrWhiteSpace(item.SourcePath) && File.Exists(item.SourcePath);
+        if (item is null) return;
+        ShortcutAssignButton.Content = Selected.ShortcutIds.Contains(item.Id) ? "Remove from this profile" : "Show in this profile";
+        ShortcutSharedButton.Content = item.Shared ? "Stop sharing globally" : "Set shared";
+    }
+
+    void ShortcutList_SelectionChanged(object sender, SelectionChangedEventArgs e) => ShortcutSelectionButtons();
+
+    sealed class ScanEntry
+    {
+        public bool Selected { get; set; } = true;
+        public required string Path { get; init; }
+        public string Label => System.IO.Path.GetFileName(Path) + "   —   " + System.IO.Path.GetDirectoryName(Path);
+    }
+
+    void ShortcutScan_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var found = ShortcutLibrary.ScanDesktop();
+            var entries = found.Where(path => !ShortcutLibrary.AlreadyImported(settings, path))
+                .Select(path => new ScanEntry { Path = path }).ToList();
+            if (entries.Count == 0)
+            {
+                Log($"Desktop scan complete: {found.Count} shortcuts found; none new to import.");
+                System.Windows.MessageBox.Show("No new desktop shortcuts found. Already-imported shortcuts are excluded.",
+                    "Scan desktop", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            var dialog = new Window
+            {
+                Title = "Scan desktop — select shortcuts",
+                Owner = this,
+                Width = 690, Height = 495, MinWidth = 450, MinHeight = 330,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(21, 30, 42))
+            };
+            var panel = new DockPanel { Margin = new Thickness(16) };
+            dialog.Content = panel;
+            var heading = new TextBlock
+            {
+                Text = $"Found {found.Count} desktop shortcuts, {entries.Count} not yet imported.\nSelect shortcuts to add to '{Selected.Name}'. Existing desktop items are untouched.",
+                Foreground = System.Windows.Media.Brushes.White, TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 0, 0, 12)
+            };
+            DockPanel.SetDock(heading, Dock.Top); panel.Children.Add(heading);
+            var actions = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal,
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };
+            DockPanel.SetDock(actions, Dock.Bottom); panel.Children.Add(actions);
+            var all = new Button { Content = "Select all", Margin = new Thickness(0, 0, 8, 0), Padding = new Thickness(10, 6, 10, 6) };
+            var none = new Button { Content = "Select none", Margin = new Thickness(0, 0, 16, 0), Padding = new Thickness(10, 6, 10, 6) };
+            var cancel = new Button { Content = "Cancel", Margin = new Thickness(0, 0, 8, 0), Padding = new Thickness(10, 6, 10, 6), IsCancel = true };
+            var import = new Button { Content = "Import selected", Padding = new Thickness(14, 6, 14, 6), IsDefault = true };
+            actions.Children.Add(all); actions.Children.Add(none); actions.Children.Add(cancel); actions.Children.Add(import);
+            var list = new StackPanel();
+            var checkboxes = entries.Select(entry =>
+            {
+                var box = new System.Windows.Controls.CheckBox
+                {
+                    Content = entry.Label, IsChecked = true, Foreground = System.Windows.Media.Brushes.White,
+                    Margin = new Thickness(4, 6, 4, 6), Tag = entry
+                };
+                list.Children.Add(box);
+                return box;
+            }).ToList();
+            all.Click += (_, _) => { foreach (var cb in checkboxes) cb.IsChecked = true; };
+            none.Click += (_, _) => { foreach (var cb in checkboxes) cb.IsChecked = false; };
+            cancel.Click += (_, _) => dialog.DialogResult = false;
+            import.Click += (_, _) => dialog.DialogResult = true;
+            panel.Children.Add(new ScrollViewer { Content = list, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+            if (dialog.ShowDialog() != true) return;
+
+            var selectedPaths = checkboxes.Where(cb => cb.IsChecked == true)
+                .Select(cb => ((ScanEntry)cb.Tag).Path).ToList();
+            if (selectedPaths.Count == 0) { Log("Scan cancelled: no shortcuts selected."); return; }
+            var profile = Selected;
+            var imported = new List<ManagedShortcut>();
+            var failures = new List<string>();
+            foreach (var path in selectedPaths)
+            {
+                ManagedShortcut? item = null;
+                try
+                {
+                    if (ShortcutLibrary.AlreadyImported(settings, path)) continue;
+                    item = ShortcutLibrary.Import(settings, path);
+                    profile.ShortcutIds.Add(item.Id);
+                    Persist();
+                    imported.Add(item);
+                }
+                catch (Exception ex)
+                {
+                    if (item != null)
+                    {
+                        settings.ManagedShortcuts.Remove(item);
+                        profile.ShortcutIds.Remove(item.Id);
+                        // Delete only the new private copy after its settings write failed.
+                        try { File.Delete(ShortcutLibrary.PathFor(item)); } catch { }
+                    }
+                    failures.Add($"{System.IO.Path.GetFileName(path)}: {ex.Message}");
+                    Diagnostics.Error("Scan import failed: " + path, ex);
+                }
+            }
+            RefreshShortcuts();
+            Log($"Desktop scan: imported {imported.Count} shortcuts into '{profile.Name}'; {failures.Count} failures. Original desktop items unchanged.");
+            if (failures.Count > 0)
+                System.Windows.MessageBox.Show(string.Join(Environment.NewLine, failures.Take(10)),
+                    "Shortcut import issues", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        catch (Exception ex) { Error(ex); }
+    }
+
+    void ShortcutImport_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "Import shortcut into DeskProfiles library",
+            Filter = "Windows shortcuts (*.lnk;*.url)|*.lnk;*.url",
+            CheckFileExists = true
+        };
+        if (dialog.ShowDialog(this) != true) return;
+        ManagedShortcut? added = null;
+        try
+        {
+            added = ShortcutLibrary.Import(settings, dialog.FileName);
+            Persist();
+            Log($"Imported shortcut '{added.Name}' to private library; original unchanged.");
+            RefreshShortcuts();
+        }
+        catch (Exception ex)
+        {
+            if (added != null) settings.ManagedShortcuts.Remove(added);
+            Error(ex);
+        }
+    }
+
+    void ShortcutFolder_Click(object sender, RoutedEventArgs e)
+    {
+        using var dialog = new Forms.FolderBrowserDialog { Description = "Create a library shortcut pointing to this folder (no files moved)" };
+        if (dialog.ShowDialog() != Forms.DialogResult.OK) return;
+        ManagedShortcut? added = null;
+        try
+        {
+            added = ShortcutLibrary.AddFolder(settings, dialog.SelectedPath);
+            Persist();
+            Log($"Created library shortcut to folder '{dialog.SelectedPath}'; folder unchanged.");
+            RefreshShortcuts();
+        }
+        catch (Exception ex)
+        {
+            if (added != null) settings.ManagedShortcuts.Remove(added);
+            Error(ex);
+        }
+    }
+
+    void ShortcutAssign_Click(object sender, RoutedEventArgs e)
+    {
+        var item = SelectedShortcut;
+        if (item == null || item.Shared) return;
+        var profile = Selected;
+        bool wasAssigned = profile.ShortcutIds.Contains(item.Id);
+        if (wasAssigned) profile.ShortcutIds.Remove(item.Id);
+        else profile.ShortcutIds.Add(item.Id);
+        try { Persist(); UpdateManagedShortcuts(); RefreshShortcuts(); Log($"'{item.Name}' {(wasAssigned ? "unassigned from" : "assigned to")} '{profile.Name}'."); }
+        catch (Exception ex)
+        {
+            if (wasAssigned) profile.ShortcutIds.Add(item.Id); else profile.ShortcutIds.Remove(item.Id);
+            Error(ex);
+        }
+    }
+
+    void ShortcutShared_Click(object sender, RoutedEventArgs e)
+    {
+        var item = SelectedShortcut;
+        if (item == null) return;
+        item.Shared = !item.Shared;
+        try { Persist(); UpdateManagedShortcuts(); Log($"'{item.Name}' global sharing: {item.Shared}."); RefreshShortcuts(); }
+        catch (Exception ex) { item.Shared = !item.Shared; Error(ex); }
+    }
+
+    void ShortcutRemove_Click(object sender, RoutedEventArgs e)
+    {
+        var item = SelectedShortcut;
+        if (item == null) return;
+        if (System.Windows.MessageBox.Show($"Remove '{item.Name}' from the DeskProfiles library?\n\nOriginal files and existing desktop shortcuts will remain unchanged.",
+                "Remove catalog entry", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+        if (item.IsManaged)
+        {
+            try { ManagedDesktop.Release(settings, item); }
+            catch (Exception ex) { Error(ex); return; }
+        }
+        var assigned = settings.Profiles.Where(p => p.ShortcutIds.Contains(item.Id)).ToList();
+        settings.ManagedShortcuts.Remove(item);
+        foreach (var p in assigned) p.ShortcutIds.Remove(item.Id);
+        try { Persist(); RefreshShortcuts(); Log($"Removed '{item.Name}' from catalog (source and library file retained)."); }
+        catch (Exception ex)
+        {
+            settings.ManagedShortcuts.Add(item);
+            foreach (var p in assigned) p.ShortcutIds.Add(item.Id);
+            Error(ex);
+        }
+    }
+
+    void UpdateManagedShortcuts()
+    {
+        if (!settings.EnableShortcutVisibilitySwitching)
+        {
+            Diagnostics.Info("[BASELINE] Shortcut reconciliation SKIPPED (disabled in Settings).");
+            return;
+        }
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var lines = ManagedDesktop.Reconcile(settings, Active).ToList();
+        foreach (var line in lines) Log(line);
+        Diagnostics.Info($"[BASELINE] Shortcut reconciliation: {watch.ElapsedMilliseconds}ms; operations={lines.Count}; managed={settings.ManagedShortcuts.Count(i => i.IsManaged)}");
+    }
+
+    void ShortcutManage_Click(object sender, RoutedEventArgs e)
+    {
+        var item = SelectedShortcut;
+        if (item == null) return;
+        if (System.Windows.MessageBox.Show($"Start managing '{item.Name}'?\n\nDeskProfiles will make a backup of the existing desktop shortcut and then show/hide only this .lnk/.url file based on profile assignments. Its target is untouched.\n\nBackups: %LOCALAPPDATA%\\DeskProfiles\\shortcut-originals", "Manage shortcut", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+        try { ManagedDesktop.Enroll(settings, item, item.SourcePath); UpdateManagedShortcuts(); RefreshShortcuts(); Log($"Enrolled '{item.Name}' for profile visibility."); }
+        catch (Exception ex) { Error(ex); }
+    }
+
+    void ShortcutSwitching_Changed(object sender, RoutedEventArgs e)
+    {
+        if (loading) return;
+        bool previous = settings.EnableShortcutVisibilitySwitching;
+        try
+        {
+            settings.EnableShortcutVisibilitySwitching = ShortcutSwitchingBox.IsChecked == true;
+            Persist();
+            Log($"[BASELINE] Shortcut visibility switching: {(settings.EnableShortcutVisibilitySwitching ? "ENABLED" : "DISABLED")}; shortcut files unchanged by toggle.");
+        }
+        catch (Exception ex)
+        {
+            settings.EnableShortcutVisibilitySwitching = previous;
+            ShortcutSwitchingBox.IsChecked = previous;
+            Error(ex);
+        }
+    }
+
+    void AutoManageShortcuts_Changed(object sender, RoutedEventArgs e)
+    {
+        if (loading) return;
+        bool enabled = AutoManageShortcutBox.IsChecked == true;
+        if (enabled && !settings.AutoManageNewShortcuts && System.Windows.MessageBox.Show(
+            "Automatically manage NEW .lnk/.url shortcuts created on your personal Desktop?\n\nExisting shortcuts will stay unmanaged. New shortcuts are backed up, assigned to the active profile, and hidden in other profiles. Real files/folders are never moved.",
+            "Automatic shortcut management", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+        { AutoManageShortcutBox.IsChecked = false; return; }
+        try { settings.AutoManageNewShortcuts = enabled; Persist(); Log($"Auto-manage new shortcuts: {enabled}"); }
+        catch (Exception ex) { Error(ex); }
+    }
+
+    // Baseline BEFORE watcher starts. Anything already on Desktop is never auto-claimed.
+    void StartDesktopReconciliation()
+    {
+        foreach (var path in EnumeratePersonalDesktopShortcuts()) knownDesktopFiles.Add(path);
+        shortcutReconcileTimer.Start();
+        Diagnostics.Info($"[DISCOVERY] Baseline {knownDesktopFiles.Count} desktop shortcuts; poll every 5s (missed events fallback).");
+    }
+
+    List<string> EnumeratePersonalDesktopShortcuts()
+    {
+        try
+        {
+            return Directory.EnumerateFiles(ManagedDesktop.UserDesktop, "*", SearchOption.TopDirectoryOnly)
+                .Where(path => Path.GetExtension(path).Equals(".lnk", StringComparison.OrdinalIgnoreCase)
+                    || Path.GetExtension(path).Equals(".url", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+        }
+        catch (Exception ex) { Diagnostics.Error("Desktop reconciliation scan", ex); return new List<string>(); }
+    }
+
+    void ReconcileDesktopInventory()
+    {
+        if (reconcilingDesktop || switchingProfile) return;
+        reconcilingDesktop = true;
+        try
+        {
+            var current = EnumeratePersonalDesktopShortcuts().ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var created = current.Except(knownDesktopFiles, StringComparer.OrdinalIgnoreCase).ToList();
+            var removed = knownDesktopFiles.Except(current, StringComparer.OrdinalIgnoreCase).ToList();
+            // Track all current names, including managed copies. They are filtered before import.
+            knownDesktopFiles.Clear();
+            knownDesktopFiles.UnionWith(current);
+            int stale = CleanupMissingUnmanagedDesktopShortcuts();
+            if (stale > 0) { Persist(); RefreshShortcuts(); }
+            if (removed.Count > 0) Diagnostics.Info($"[DISCOVERY] Missing desktop paths={removed.Count}; stale unmanaged={stale}");
+            foreach (var path in created)
+            {
+                Diagnostics.Info($"[DISCOVERY] Poll found new file {Path.GetFileName(path)}; autoManage={settings.AutoManageNewShortcuts}");
+                QueueNewShortcut(path);
+            }
+        }
+        catch (Exception ex) { Diagnostics.Error("Desktop reconciliation", ex); }
+        finally { reconcilingDesktop = false; }
+    }
+
+    void StartShortcutWatcher()
+    {
+        try
+        {
+            desktopWatcher = new FileSystemWatcher(ManagedDesktop.UserDesktop)
+            { IncludeSubdirectories = false, NotifyFilter = NotifyFilters.FileName, EnableRaisingEvents = true };
+            desktopWatcher.Created += (_, e) => QueueNewShortcut(e.FullPath);
+            desktopWatcher.Renamed += (_, e) => QueueNewShortcut(e.FullPath);
+            desktopWatcher.Deleted += (_, e) => Dispatcher.BeginInvoke(() => {
+                if (switchingProfile) return;
+                int stale = CleanupMissingUnmanagedDesktopShortcuts();
+                if (stale > 0) { Persist(); RefreshShortcuts(); Log($"[DISCOVERY] Deleted shortcut removed from catalog: {Path.GetFileName(e.FullPath)}"); }
+            });
+            desktopWatcher.Error += (_, e) => Diagnostics.Error("Desktop watcher overflow", e.GetException());
+            Log("Desktop shortcut watcher running. Only shortcuts created after startup are eligible for auto-management.");
+        }
+        catch (Exception ex) { Diagnostics.Error("Shortcut watcher unavailable", ex); }
+    }
+
+    void QueueNewShortcut(string path)
+    {
+        if (Path.GetExtension(path) is not (".lnk" or ".url")) return;
+        Diagnostics.Info($"[DISCOVERY] Event {Path.GetFileName(path)}; active={settings.ActiveProfile}; autoManage={settings.AutoManageNewShortcuts}");
+        Dispatcher.BeginInvoke(() => {
+            if (!discoveredForProfile.ContainsKey(path)) discoveredForProfile[path] = settings.ActiveProfile;
+            newDesktopShortcuts.Add(path);
+            shortcutWatchTimer.Stop(); shortcutWatchTimer.Start();
+        });
+    }
+
+    void NewShortcutTimer_Tick(object? sender, EventArgs e)
+    {
+        if (switchingProfile) { shortcutWatchTimer.Stop(); shortcutWatchTimer.Start(); return; }
+        shortcutWatchTimer.Stop();
+        var paths = newDesktopShortcuts.ToList(); newDesktopShortcuts.Clear();
+        Diagnostics.Info($"[DISCOVERY] Batch count={paths.Count}; active={settings.ActiveProfile}; autoManage={settings.AutoManageNewShortcuts}");
+        if (!settings.AutoManageNewShortcuts || !settings.EnableShortcutVisibilitySwitching)
+        {
+            Diagnostics.Info("[DISCOVERY] Auto-management disabled: files left unmanaged.");
+            foreach (var path in paths) discoveredForProfile.Remove(path);
+            return;
+        }
+        foreach (var path in paths)
+        {
+            var discoveryTimer = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                if (!File.Exists(path)) continue;
+                var owner = settings.Profiles.FirstOrDefault(p => p.Name == discoveredForProfile.GetValueOrDefault(path)) ?? Active;
+                if (settings.ManagedShortcuts.Any(i => i.IsManaged && string.Equals(i.DesktopFileName, Path.GetFileName(path), StringComparison.OrdinalIgnoreCase))) continue;
+                if (ShortcutLibrary.AlreadyImported(settings, path))
+                {
+                    var existing = settings.ManagedShortcuts.FirstOrDefault(i => !i.IsManaged && string.Equals(i.SourcePath, path, StringComparison.OrdinalIgnoreCase));
+                    if (existing == null) { Log($"New shortcut {Path.GetFileName(path)} already cataloged; left unmanaged."); continue; }
+                    if (!owner.ShortcutIds.Contains(existing.Id)) owner.ShortcutIds.Add(existing.Id);
+                    ManagedDesktop.Enroll(settings, existing, path);
+                }
+                else
+                {
+                    var item = ShortcutLibrary.Import(settings, path);
+                    owner.ShortcutIds.Add(item.Id);
+                    ManagedDesktop.Enroll(settings, item, path);
+                }
+                UpdateManagedShortcuts();
+                Log($"Automatically assigned new shortcut '{Path.GetFileName(path)}' to '{owner.Name}'.");
+                RefreshShortcuts();
+            }
+            catch (Exception ex) { Diagnostics.Error("Auto-manage shortcut " + path, ex); Log("Auto-import failed: " + ex.Message); }
+            finally { discoveredForProfile.Remove(path); Diagnostics.Info($"[DISCOVERY] Processed {Path.GetFileName(path)} in {discoveryTimer.ElapsedMilliseconds}ms; active={settings.ActiveProfile}"); }
+        }
     }
 
     void RefreshWallpaper()
@@ -306,53 +881,152 @@ public partial class MainWindow : Window
         if (!loading && ProfileList.SelectedItem != null) { RefreshDetails(); ShowPage("profiles"); }
     }
 
-    void Activate_Click(object sender, RoutedEventArgs e) => ActivateProfile(Selected);
+    void Activate_Click(object sender, RoutedEventArgs e) => _ = ActivateProfileAsync(Selected);
 
-    void ActivateProfile(Profile profile)
+    // Called from both the UI and global hotkeys. Never allow two switches to overlap.
+    void ActivateProfile(Profile profile) => _ = ActivateProfileAsync(profile);
+
+    async System.Threading.Tasks.Task ActivateProfileAsync(Profile profile)
     {
-        if (ReferenceEquals(profile, Active)) return;
+        if (switchingProfile || ReferenceEquals(profile, Active)) return;
+        switchingProfile = true;
+        SwitchOverlay.Visibility = Visibility.Visible;
+        SwitchTitle.Text = $"Switching to {profile.Name}…";
+        SwitchStage.Text = "Preparing shortcuts";
+        SwitchProgress.IsIndeterminate = true;
+        Log($"Switch started: {Active.Name} -> {profile.Name} ({currentTopology})");
         var previous = settings.ActiveProfile;
+        List<IconPosition>? before = null;
+        bool committed = false;
+        var trace = new SwitchTrace(previous, profile.Name, currentTopology);
+        trace.Note($"Managed={settings.ManagedShortcuts.Count(i => i.IsManaged)}; desired={settings.ManagedShortcuts.Count(i => i.IsManaged && (i.Shared || profile.ShortcutIds.Contains(i.Id)))}; savedLayoutIcons={FindLayout(profile)?.Icons.Count ?? 0}");
         try
         {
-            // Capture the current positions before activating a different profile.
-            // No saved layout is overwritten: Save is always an explicit action.
-            List<IconPosition>? before = null;
-            int applied = 0;
-            if (FindLayout(profile) is { } layout)
+            // Render the overlay before synchronous Shell calls begin.
+            await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            trace.Next("Pre-switch capture and validation");
+            var layout = FindLayout(profile);
+            if (layout != null)
             {
                 before = DesktopIcons.Capture();
-                if (before.Count == 0) throw new InvalidOperationException("Cannot capture current icons; profile switch aborted.");
-                applied = DesktopIcons.Restore(layout.Icons);
-                if (applied == 0) throw new InvalidOperationException("The selected layout matches no current icons; profile switch aborted.");
+                if (before.Count == 0) throw new InvalidOperationException("Cannot capture desktop icon positions; switch cancelled.");
             }
+            if (Key() != currentTopology) throw new InvalidOperationException("Monitor configuration is changing; please retry when it settles.");
             settings.ActiveProfile = profile.Name;
-            undo = before;
-            try { Persist(); }
-            catch
+            Persist();
+            committed = true;
+            trace.Next("Shortcut reconcile");
+            SwitchStage.Text = "Updating desktop shortcuts";
+            UpdateManagedShortcuts();
+            // Give Explorer time to show the new .lnk/.url entries in its desktop view.
+            // The desktop can legitimately include unmanaged icons, so compare only known
+            // managed item visibility; never require the entire icon count to match.
+            trace.Next("Explorer readiness");
+            SwitchStage.Text = "Waiting for Windows Explorer";
+            bool ready = !settings.EnableShortcutVisibilitySwitching || await WaitForManagedShortcutsAsync(profile, TimeSpan.FromSeconds(4));
+            trace.Note($"Explorer ready={ready}; shortcutVisibilityEnabled={settings.EnableShortcutVisibilitySwitching}");
+            if (!ready) Log("Warning: Explorer icon inventory did not settle; only currently visible icons will be positioned.");
+            trace.Next("Layout restoration and verification");
+            if (layout != null)
             {
-                settings.ActiveProfile = previous;
-                if (before != null) DesktopIcons.Restore(before);
-                throw;
+                SwitchStage.Text = "Restoring icon positions";
+                // Hidden managed shortcuts may still have historical positions in this saved layout.
+                // They are not restoration failures. Never delete those saved entries.
+                var hiddenFiles = settings.EnableShortcutVisibilitySwitching
+                    ? settings.ManagedShortcuts.Where(i => i.IsManaged && !i.Shared && !profile.ShortcutIds.Contains(i.Id))
+                        .Select(i => i.DesktopFileName).Where(n => !string.IsNullOrWhiteSpace(n)).ToArray()
+                    : Array.Empty<string>();
+                var eligible = layout.Icons.Where(i => !hiddenFiles.Any(n => DesktopIcons.KeyMatchesFilename(i.Pidl, n))).ToList();
+                trace.Note($"Layout eligible={eligible.Count}/{layout.Icons.Count}; intentionallyHidden={layout.Icons.Count - eligible.Count}");
+                int matched = 0;
+                int missing = 0;
+                int tries = 0;
+                // Only retry icons still visible and out of place. A missing Explorer item
+                // cannot be fixed with SelectAndPositionItems until Explorer creates it.
+                for (int attempt = 0; attempt < 3; attempt++)
+                {
+                    if (Key() != currentTopology) { Log("Monitor changed during switch; stopped position restoration."); break; }
+                    var current = DesktopIcons.Capture().ToDictionary(i => i.Pidl, StringComparer.OrdinalIgnoreCase);
+                    var visible = eligible.Where(i => current.ContainsKey(i.Pidl)).ToList();
+                    var wrong = visible.Where(i => Math.Abs(current[i.Pidl].X - i.X) > 2 || Math.Abs(current[i.Pidl].Y - i.Y) > 2).ToList();
+                    missing = eligible.Count - visible.Count;
+                    matched = visible.Count - wrong.Count;
+                    if (wrong.Count == 0) break;
+                    tries++;
+                    int applied = DesktopIcons.Restore(wrong);
+                    trace.Note($"Position attempt {tries}: eligible={eligible.Count} visible={visible.Count} wrong={wrong.Count} applied={applied} missing={missing}");
+                    await System.Threading.Tasks.Task.Delay(250);
+                }
+                // Final verification after the last Explorer update.
+                var finalPositions = DesktopIcons.Capture().ToDictionary(i => i.Pidl, StringComparer.OrdinalIgnoreCase);
+                matched = eligible.Count(i => finalPositions.TryGetValue(i.Pidl, out var p) && Math.Abs(p.X - i.X) <= 2 && Math.Abs(p.Y - i.Y) <= 2);
+                missing = eligible.Count(i => !finalPositions.ContainsKey(i.Pidl));
+                foreach (var line in DesktopIcons.DescribeLayoutDifferences(eligible)) trace.Note(line);
+                trace.Note($"Layout verified={matched}/{eligible.Count}; missingUnexpectedly={missing}; deliberatelyHidden={layout.Icons.Count - eligible.Count}; restoreAttempts={tries}");
+                Log($"Layout: {matched}/{eligible.Count} visible expected icons positioned; {missing} unexpectedly missing; {layout.Icons.Count - eligible.Count} intentionally hidden.");
             }
+            else Log($"No saved layout for '{profile.Name}' on this monitor setup; icon positions unchanged.");
+            trace.Next("Wallpaper");
+            SwitchStage.Text = "Applying wallpaper";
+            if (profile.UseCustomWallpaper)
+            {
+                try { WallpaperService.Apply(profile); }
+                catch (Exception ex) { Diagnostics.Error("Wallpaper apply failed", ex); Log("Wallpaper warning: " + ex.Message); }
+            }
+            undo = before; // Retain PRE-SWITCH snapshot; retries must not replace it.
             ReloadProfiles(profile);
+            RefreshDetails();
+            // Give WPF and Explorer time to paint the completed state before unlocking.
+            trace.Next("UI completion");
+            SwitchStage.Text = "Finishing";
+            await System.Threading.Tasks.Task.Delay(350);
+            await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            Log($"Activated '{profile.Name}'." + (before != null ? " Undo preserves the pre-switch positions." : ""));
+        }
+        catch (Exception ex)
+        {
+            trace.Note($"ERROR: {ex.GetType().Name}: {ex.Message}");
+            Diagnostics.Error("Profile switch failed", ex);
+            if (!committed) settings.ActiveProfile = previous;
+            // If already committed, keep the active profile in sync with persisted settings;
+            // changing metadata back without reversing shortcut operations is unsafe.
+            Log("Profile switch error: " + ex.Message);
+            try { ReloadProfiles(Active); } catch { }
+            System.Windows.MessageBox.Show(ex.Message + "\n\nSee Activity & Logs for details.", "DeskProfiles", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally
+        {
+            trace.Finish();
+            SwitchOverlay.Visibility = Visibility.Collapsed;
+            switchingProfile = false;
+            RefreshDetails();
+        }
+    }
+
+    async System.Threading.Tasks.Task<bool> WaitForManagedShortcutsAsync(Profile profile, TimeSpan timeout)
+    {
+        var managed = settings.ManagedShortcuts.Where(i => i.IsManaged && !string.IsNullOrWhiteSpace(i.DesktopFileName)).ToList();
+        var desired = managed.Where(i => i.Shared || profile.ShortcutIds.Contains(i.Id))
+            .Select(i => i.DesktopFileName).ToList();
+        var hidden = managed.Where(i => !i.Shared && !profile.ShortcutIds.Contains(i.Id))
+            .Select(i => i.DesktopFileName).ToList();
+        var start = DateTime.UtcNow;
+        int stable = 0;
+        while (DateTime.UtcNow - start < timeout)
+        {
+            if (Key() != currentTopology) return false;
             try
             {
-                if (profile.UseCustomWallpaper)
-                {
-                    WallpaperService.Apply(profile);
-                    Log($"Applied wallpaper for '{profile.Name}'.");
-                }
+                var icons = DesktopIcons.Capture();
+                bool visibleExpected = desired.All(name => icons.Any(i => DesktopIcons.KeyMatchesFilename(i.Pidl, name)));
+                bool absentExpected = hidden.All(name => !icons.Any(i => DesktopIcons.KeyMatchesFilename(i.Pidl, name)));
+                if (visibleExpected && absentExpected && icons.Count > 0) stable++; else stable = 0;
+                if (stable >= 2) return true;
             }
-            catch (Exception wallpaperError)
-            {
-                Diagnostics.Error("Wallpaper apply failed after profile activation", wallpaperError);
-                Log($"Warning: profile activated but wallpaper was not applied: {wallpaperError.Message}");
-            }
-            Log(before is null
-                ? $"Activated '{profile.Name}'; no saved layout for this monitor setup. Icon positions unchanged. Arrange and Save when ready."
-                : $"Activated '{profile.Name}' and restored {applied} icon positions. Undo is available.");
+            catch (Exception ex) { Diagnostics.Error("Explorer readiness probe", ex); stable = 0; }
+            await System.Threading.Tasks.Task.Delay(150);
         }
-        catch (Exception ex) { settings.ActiveProfile = previous; ReloadProfiles(profile); Error(ex); }
+        return false;
     }
 
     void Rename_Click(object sender, RoutedEventArgs e)
@@ -393,6 +1067,7 @@ public partial class MainWindow : Window
 
     void Save_Click(object sender, RoutedEventArgs e)
     {
+        if (switchingProfile) return;
         try
         {
             var captured = DesktopIcons.Capture();
@@ -408,6 +1083,7 @@ public partial class MainWindow : Window
     void Restore_Click(object sender, RoutedEventArgs e) => RestoreCurrent();
     void RestoreCurrent()
     {
+        if (switchingProfile) return;
         try
         {
             if (FindLayout(Active) is not { } layout)
@@ -424,6 +1100,7 @@ public partial class MainWindow : Window
 
     void Undo_Click(object sender, RoutedEventArgs e)
     {
+        if (switchingProfile) return;
         if (undo == null) { Log("No successful restore to undo in this session."); return; }
         try
         {
@@ -461,6 +1138,7 @@ public partial class MainWindow : Window
 
     void MonitorTimer_Tick(object? sender, EventArgs e)
     {
+        if (switchingProfile) return;
         string topology;
         try { topology = Key(); }
         catch (Exception ex) { Diagnostics.Error("Monitor polling", ex); return; }
@@ -521,6 +1199,7 @@ public partial class MainWindow : Window
             Hide();
             return;
         }
+        shortcutWatchTimer.Stop(); shortcutReconcileTimer.Stop(); desktopWatcher?.Dispose();
         hotkeys?.Dispose();
         if (tray != null)
         {

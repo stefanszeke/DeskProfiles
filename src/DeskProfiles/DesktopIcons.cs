@@ -91,6 +91,28 @@ internal static class DesktopIcons
     }
 
     // PIDL is a sequence of SHITEMID blocks; each starts with a ushort cb and terminates with a zero ushort.
+    // SIGDN_PARENTRELATIVEPARSING: stable within the Desktop folder even if a .lnk
+    // is removed and copied back. The older raw-PIDL layout keys remain supported.
+    [DllImport("shell32.dll", PreserveSig = true)]
+    static extern int SHGetNameFromIDList(IntPtr pidl, uint sigdnName, out IntPtr ppszName);
+
+    static string StableKey(IntPtr pidl, string rawPidl)
+    {
+        IntPtr result = IntPtr.Zero;
+        try
+        {
+            const uint SIGDN_PARENTRELATIVEPARSING = 0x80018001;
+            if (SHGetNameFromIDList(pidl, SIGDN_PARENTRELATIVEPARSING, out result) == 0 && result != IntPtr.Zero)
+            {
+                var name = Marshal.PtrToStringUni(result);
+                if (!string.IsNullOrWhiteSpace(name)) return "name:" + name.ToUpperInvariant();
+            }
+        }
+        catch (Exception) { /* Some virtual desktop objects cannot provide a parsing name. */ }
+        finally { if (result != IntPtr.Zero) Marshal.FreeCoTaskMem(result); }
+        return rawPidl;
+    }
+
     static byte[] PidlBytes(IntPtr pidl)
     {
         var length = 0;
@@ -120,6 +142,8 @@ internal static class DesktopIcons
                 {
                     view.GetItemPosition(pidl, out var pos);
                     var key = Convert.ToBase64String(PidlBytes(pidl));
+                    // Keep raw keys for backward compatibility, and a stable key for new layouts.
+                    // Ownership of the PIDL is tracked only by the raw entry.
                     found[key] = (pidl, pos);
                 }
                 catch { Marshal.FreeCoTaskMem(pidl); throw; }
@@ -129,17 +153,63 @@ internal static class DesktopIcons
         catch { foreach (var entry in found.Values) Marshal.FreeCoTaskMem(entry.Pidl); throw; }
         finally { Marshal.ReleaseComObject(iterator); }
     }
+    // Stable desktop parsing names may be filenames or paths. Match only the final
+    // component, with a directory boundary, to avoid substring collisions.
+    public static bool KeyMatchesFilename(string key, string fileName)
+    {
+        if (!key.StartsWith("name:", StringComparison.OrdinalIgnoreCase)) return false;
+        var name = key[5..].Replace('/', '\\');
+        return name.Equals(fileName, StringComparison.OrdinalIgnoreCase)
+            || name.EndsWith("\\" + fileName, StringComparison.OrdinalIgnoreCase);
+    }
+
     public static List<IconPosition> Capture()
     {
         var view = OpenView();
         try
         {
             var icons = Enumerate(view);
-            try { return icons.Select(kv => new IconPosition { Pidl = kv.Key, X = kv.Value.Position.X, Y = kv.Value.Position.Y }).ToList(); }
+            try { return icons.Select(kv => new IconPosition { Pidl = StableKey(kv.Value.Pidl, kv.Key), X = kv.Value.Position.X, Y = kv.Value.Position.Y }).ToList(); }
             finally { foreach (var icon in icons.Values) Marshal.FreeCoTaskMem(icon.Pidl); }
         }
         finally { Marshal.ReleaseComObject(view); }
     }
+    // Read-only diagnostics: does not reposition any icons or alter saved layouts.
+    public static IReadOnlyList<string> DescribeLayoutDifferences(IReadOnlyCollection<IconPosition> saved, int tolerance = 2)
+    {
+        var current = Capture();
+        var byKey = current.ToDictionary(i => i.Pidl, StringComparer.OrdinalIgnoreCase);
+        var result = new List<string>();
+        int ok = 0, moved = 0, missing = 0;
+        foreach (var expected in saved)
+        {
+            var label = expected.Pidl.StartsWith("name:", StringComparison.OrdinalIgnoreCase)
+                ? expected.Pidl[5..]
+                : "legacy-pidl:" + expected.Pidl[..Math.Min(18, expected.Pidl.Length)];
+            label = label.Replace('\\', '/').Replace('\r', ' ').Replace('\n', ' ');
+            if (!byKey.TryGetValue(expected.Pidl, out var observed))
+            {
+                missing++;
+                result.Add($"[ICON] NOT FOUND '{label}' expected=({expected.X},{expected.Y}); reason=saved ID absent in current Explorer view");
+                continue;
+            }
+            var dx = observed.X - expected.X;
+            var dy = observed.Y - expected.Y;
+            if (Math.Abs(dx) <= tolerance && Math.Abs(dy) <= tolerance)
+            {
+                ok++;
+                result.Add($"[ICON] OK '{label}' expected=({expected.X},{expected.Y}) actual=({observed.X},{observed.Y})");
+            }
+            else
+            {
+                moved++;
+                result.Add($"[ICON] MOVED '{label}' expected=({expected.X},{expected.Y}) actual=({observed.X},{observed.Y}) delta=({dx:+#;-#;0},{dy:+#;-#;0})");
+            }
+        }
+        result.Insert(0, $"[ICON] SUMMARY saved={saved.Count} visible={current.Count} ok={ok} moved={moved} notFound={missing} tolerance={tolerance}px");
+        return result;
+    }
+
     public static int Restore(IReadOnlyCollection<IconPosition> positions)
     {
         var view = OpenView();
@@ -149,8 +219,13 @@ internal static class DesktopIcons
             try
             {
                 var pidls = new List<IntPtr>(); var points = new List<Point>();
+                var stable = icons.ToDictionary(kv => StableKey(kv.Value.Pidl, kv.Key), kv => kv.Value, StringComparer.OrdinalIgnoreCase);
                 foreach (var pos in positions)
-                    if (icons.TryGetValue(pos.Pidl, out var match)) { pidls.Add(match.Pidl); points.Add(new Point { X = pos.X, Y = pos.Y }); }
+                {
+                    // First try the new stable name, then the previous raw PIDL format.
+                    if (stable.TryGetValue(pos.Pidl, out var match) || icons.TryGetValue(pos.Pidl, out match))
+                    { pidls.Add(match.Pidl); points.Add(new Point { X = pos.X, Y = pos.Y }); }
+                }
                 if (pidls.Count > 0) view.SelectAndPositionItems((uint)pidls.Count, pidls.ToArray(), points.ToArray(), 0x80); // SVSI_POSITIONITEM
                 return pidls.Count;
             }
