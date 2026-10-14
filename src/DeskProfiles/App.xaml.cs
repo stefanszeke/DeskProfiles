@@ -47,6 +47,13 @@ public partial class App : System.Windows.Application
         DispatcherUnhandledException += OnUnhandledException;
         Diagnostics.Info("Application starting, version 0.2.2; single-instance lock acquired");
         base.OnStartup(e);
+        // Only the process that acquired the mutex may construct MainWindow.
+        // Its constructor calls RecoverAtStartup(), which can redirect the actual
+        // Windows Desktop. StartupUri would otherwise allow a rejected second
+        // instance to create that window during WPF startup/shutdown.
+        var window = new MainWindow();
+        MainWindow = window;
+        window.Show();
     }
 
     protected override void OnExit(ExitEventArgs e)

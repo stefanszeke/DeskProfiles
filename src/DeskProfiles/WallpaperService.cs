@@ -15,6 +15,37 @@ public static class WallpaperService
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SystemParametersInfo(uint action, uint param, string path, uint flags);
 
+    // Capture the user's Windows wallpaper while Original Desktop is active. This
+    // baseline survives process exit/restart; never infer it from a Games/Work wallpaper.
+    public static (string Path, string Style)? CaptureCurrent()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop");
+        var path = key?.GetValue("Wallpaper") as string;
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return null;
+        var styleCode = key?.GetValue("WallpaperStyle")?.ToString() ?? "10";
+        var tile = key?.GetValue("TileWallpaper")?.ToString() ?? "0";
+        var style = tile == "1" ? "Tile" : styleCode switch
+        {
+            "6" => "Fit", "2" => "Stretch", "0" => "Center",
+            "22" => "Span", _ => "Fill"
+        };
+        return (path, style);
+    }
+
+    public static void RestoreOriginal(Settings settings)
+    {
+        var original = settings.Profiles.FirstOrDefault(p => p.IsOriginalDesktop);
+        if (original?.UseCustomWallpaper == true)
+        {
+            Apply(original);
+            return;
+        }
+        if (!string.IsNullOrWhiteSpace(settings.OriginalWallpaperPath))
+            Apply(new Profile { UseCustomWallpaper = true,
+                WallpaperPath = settings.OriginalWallpaperPath,
+                WallpaperStyle = settings.OriginalWallpaperStyle });
+    }
+
     public static void Apply(Profile profile)
     {
         if (!profile.UseCustomWallpaper) return;

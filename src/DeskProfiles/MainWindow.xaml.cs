@@ -1583,7 +1583,28 @@ public partial class MainWindow : Window
             else Log($"No saved layout for '{profile.Name}' on this monitor setup; icon positions unchanged.");
             trace.Next("Wallpaper");
             SetSwitchStage("Applying wallpaper");
-            if (profile.UseCustomWallpaper)
+            // Capture only while leaving Original Desktop; a startup on Games/Work
+            // must never be mistaken for the user's original Windows wallpaper.
+            if (settings.Profiles.Any(p => p.Name == previous && p.IsOriginalDesktop))
+            {
+                try
+                {
+                    var baseline = WallpaperService.CaptureCurrent();
+                    if (baseline != null)
+                    {
+                        settings.OriginalWallpaperPath = baseline.Value.Path;
+                        settings.OriginalWallpaperStyle = baseline.Value.Style;
+                        Persist();
+                    }
+                }
+                catch (Exception ex) { Diagnostics.Error("Capture Original Desktop wallpaper", ex); }
+            }
+            if (profile.IsOriginalDesktop)
+            {
+                try { WallpaperService.RestoreOriginal(settings); }
+                catch (Exception ex) { Diagnostics.Error("Wallpaper restore on Original Desktop activation failed", ex); Log("Wallpaper warning: " + ex.Message); }
+            }
+            if (profile.UseCustomWallpaper && !profile.IsOriginalDesktop)
             {
                 try { WallpaperService.Apply(profile); }
                 catch (Exception ex) { Diagnostics.Error("Wallpaper apply failed", ex); Log("Wallpaper warning: " + ex.Message); }
@@ -1957,6 +1978,18 @@ public partial class MainWindow : Window
 
         try
         {
+            // Restoring the folder does not change the system wallpaper. Restore
+            // the Original Desktop wallpaper even when no icon layout was saved.
+            try
+            {
+                WallpaperService.RestoreOriginal(settings);
+                Log("[EXIT] Original Desktop wallpaper restore requested.");
+            }
+            catch (Exception ex)
+            {
+                Diagnostics.Error("Original Desktop wallpaper restoration on exit", ex);
+                Log("[EXIT] Wallpaper restore warning: " + ex.Message);
+            }
             if (layout != null)
             {
                 // The original Desktop folder is now active, but Explorer populates its
