@@ -20,6 +20,8 @@ public partial class MainWindow : Window
     HotkeyManager? hotkeys;
     Forms.NotifyIcon? tray;
     bool reallyExit;
+    bool exitRestoreInProgress;
+    bool exitRestoreComplete;
     bool resumingSavedWholeDesktop;
     bool recordingHotkey;
     bool switchingProfile;
@@ -1895,22 +1897,17 @@ public partial class MainWindow : Window
             Hide();
             return;
         }
-        // The switch loader is a standalone WPF Window. Hiding it is not enough:
-        // WPF's default shutdown mode waits until *all* windows have closed.
-        monitorTransitionGeneration++;
-        monitorTimer.Stop();
-        shortcutWatchTimer.Stop();
-        shortcutReconcileTimer.Stop();
-        // On normal exit, restore Windows' original Desktop path BEFORE process shutdown.
-        try { WholeDesktopFolders.Restore(); }
-        catch (Exception ex)
+        // Keep the WPF dispatcher alive while Explorer changes the Desktop folder.
+        // Closing immediately here leaves Original Desktop icons in Explorer's default row.
+        if (!exitRestoreComplete)
         {
-            Diagnostics.Error("Cannot restore original Windows Desktop on exit", ex);
-            System.Windows.MessageBox.Show("Windows Desktop restoration FAILED. DeskProfiles will remain open so you can use 'Restore original Windows Desktop now' in Settings.\n\n" + ex.Message, "Desktop recovery required", MessageBoxButton.OK, MessageBoxImage.Error);
-            reallyExit = false;
             e.Cancel = true;
+            if (!exitRestoreInProgress)
+                _ = RestoreOriginalLayoutAndExitAsync();
             return;
         }
+        // The switch loader is a standalone WPF Window. Hiding it is not enough:
+        // WPF's default shutdown mode waits until *all* windows have closed.
         desktopWatcher?.Dispose();
         desktopWatcher = null;
         hotkeys?.Dispose();
@@ -1929,6 +1926,83 @@ public partial class MainWindow : Window
         // Explicitly exit instead of depending on OnLastWindowClose with tray/loader windows.
         Dispatcher.BeginInvoke(new Action(() => System.Windows.Application.Current.Shutdown()),
             DispatcherPriority.ContextIdle);
+    }
+
+    async System.Threading.Tasks.Task RestoreOriginalLayoutAndExitAsync()
+    {
+        exitRestoreInProgress = true;
+        // Suppress monitor/shortcut work and cancel any pending layout-transition pass.
+        monitorTransitionGeneration++;
+        monitorTimer.Stop();
+        shortcutWatchTimer.Stop();
+        shortcutReconcileTimer.Stop();
+        var original = settings.Profiles.FirstOrDefault(p => p.IsOriginalDesktop);
+        var layout = original == null ? null : FindLayout(original);
+        try
+        {
+            WholeDesktopFolders.Restore();
+        }
+        catch (Exception ex)
+        {
+            Diagnostics.Error("Cannot restore original Windows Desktop on exit", ex);
+            System.Windows.MessageBox.Show(
+                "Windows Desktop restoration FAILED. DeskProfiles will remain open so you can use 'Restore original Windows Desktop now' in Settings.\n\n" + ex.Message,
+                "Desktop recovery required", MessageBoxButton.OK, MessageBoxImage.Error);
+            reallyExit = false;
+            exitRestoreInProgress = false;
+            monitorTimer.Start();
+            if (!settings.UseWholeDesktopFolders) { StartShortcutWatcher(); StartDesktopReconciliation(); }
+            return;
+        }
+
+        try
+        {
+            if (layout != null)
+            {
+                // The original Desktop folder is now active, but Explorer populates its
+                // icon view asynchronously. Never capture/save default startup positions.
+                var desired = layout.Icons.ToList();
+                Log($"[EXIT] Waiting for Original Desktop icons ({desired.Count} saved positions).");
+                var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+                while (DateTime.UtcNow < deadline)
+                {
+                    var present = DesktopIcons.Capture().Select(p => p.Pidl)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    if (desired.All(p => present.Contains(p.Pidl))) break;
+                    await System.Threading.Tasks.Task.Delay(120);
+                }
+                for (int attempt = 1; attempt <= 3; attempt++)
+                {
+                    var current = DesktopIcons.Capture()
+                        .ToDictionary(p => p.Pidl, StringComparer.OrdinalIgnoreCase);
+                    var wrong = desired.Where(p => current.TryGetValue(p.Pidl, out var actual) &&
+                        (Math.Abs(p.X - actual.X) > 2 || Math.Abs(p.Y - actual.Y) > 2)).ToList();
+                    if (wrong.Count == 0) break;
+                    int applied = DesktopIcons.Restore(wrong);
+                    Log($"[EXIT] Restore pass {attempt}: positioned {applied}/{wrong.Count} icons.");
+                    await System.Threading.Tasks.Task.Delay(250);
+                }
+                var final = DesktopIcons.Capture()
+                    .ToDictionary(p => p.Pidl, StringComparer.OrdinalIgnoreCase);
+                int correct = desired.Count(p => final.TryGetValue(p.Pidl, out var actual) &&
+                    Math.Abs(p.X - actual.X) <= 2 && Math.Abs(p.Y - actual.Y) <= 2);
+                Log($"[EXIT] Original Desktop layout verified: {correct}/{desired.Count} correct.");
+            }
+            else Log("[EXIT] No saved Original Desktop layout for this monitor setup; leaving Explorer's layout unchanged.");
+        }
+        catch (Exception ex)
+        {
+            // The known-folder location has already been restored: don't trap the
+            // user in the app merely because icon positioning or verification failed.
+            Diagnostics.Error("Original Desktop layout restoration on exit", ex);
+            Log("[EXIT] Original Desktop restored, but layout verification failed: " + ex.Message);
+        }
+        finally
+        {
+            exitRestoreComplete = true;
+            exitRestoreInProgress = false;
+            Close(); // Complete normal cleanup only after the layout restore passes.
+        }
     }
 
     void HotkeyRecord_Click(object sender, RoutedEventArgs e)
